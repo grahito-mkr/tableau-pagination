@@ -60,28 +60,35 @@ export class TableauClient {
   }
 
   /**
-   * Apply filter to worksheet (page/pagination filter)
-   * e.g., filterByPageNumber("Page Number", 1)
+   * Apply filter to worksheet (page/pagination filter).
+   * applyFilterAsync requires the values as an array, even for a single value.
    */
   async applyFilter(filterName: string, filterValue: string | number): Promise<void> {
     if (!this.worksheet) throw new Error("No worksheet initialized");
-    await this.worksheet.applyFilterAsync(filterName, String(filterValue), window.tableau.FilterUpdateType.Replace);
+    await this.worksheet.applyFilterAsync(
+      filterName,
+      [String(filterValue)],
+      window.tableau.FilterUpdateType.Replace
+    );
   }
 
   /**
-   * Clear a filter
+   * Clear a filter (show all values)
    */
   async clearFilter(filterName: string): Promise<void> {
     if (!this.worksheet) throw new Error("No worksheet initialized");
-    await this.worksheet.applyFilterAsync(filterName, "", window.tableau.FilterUpdateType.All);
+    await this.worksheet.applyFilterAsync(filterName, [], window.tableau.FilterUpdateType.All);
   }
 
   /**
-   * Get all filter names for this worksheet
+   * Get all filter names for this worksheet.
+   * getFiltersAsync is asynchronous and returns a Promise of Filter objects;
+   * each Filter exposes a fieldName.
    */
-  getFilterNames(): string[] {
+  async getFilterNames(): Promise<string[]> {
     if (!this.worksheet) return [];
-    return this.worksheet.getFilters().map((f: any) => f.name);
+    const filters = await this.worksheet.getFiltersAsync();
+    return filters.map((f: any) => f.fieldName);
   }
 
   /**
