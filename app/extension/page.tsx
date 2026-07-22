@@ -29,9 +29,10 @@ export default function ExportPage() {
       const client = new TableauClient();
       client
         .initialize()
-        .then(() => {
+        .then(async () => {
           setReady(true);
-          setFilterNames(client.getFilterNames());
+          const names = await client.getFilterNames();
+          setFilterNames(names);
         })
         .catch((err: any) => {
           // initializeAsync itself rejected (e.g. not running inside Tableau)
