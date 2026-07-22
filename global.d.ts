@@ -27,12 +27,17 @@ declare global {
   }
 }
 
+interface TableauFilter {
+  fieldName: string;
+  filterType: string;
+}
+
 interface Worksheet {
   name: string;
-  getFilters(): Array<{ name: string }>;
+  getFiltersAsync(): Promise<TableauFilter[]>;
   applyFilterAsync(
-    filterName: string,
-    value: string,
+    fieldName: string,
+    values: string[],
     updateType: string
   ): Promise<void>;
   getUnderlyingDataAsync(options?: { maxRows: number }): Promise<{ data: Array<Record<string, unknown>> }>;
