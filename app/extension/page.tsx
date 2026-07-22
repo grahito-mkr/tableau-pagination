@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import Script from "next/script";
 import { TableauClient } from "@/lib/tableauClient";
 import { ExportOrchestrator, type ExportOptions } from "@/lib/exportOrchestrator";
 
@@ -19,23 +18,33 @@ export default function ExportPage() {
   const [initError, setInitError] = useState<string | null>(null);
 
   /**
-   * Initialize Tableau Extensions
+   * Initialize Tableau Extensions.
+   * The SDK is loaded as a blocking <script> in the layout <head>, so
+   * window.tableau should already exist by the time this runs.
    */
   function initTableau() {
     if (!window.tableau) return;
 
     try {
       const client = new TableauClient();
-      client.initialize().then(() => {
-        setReady(true);
-        setFilterNames(client.getFilterNames());
-      });
+      client
+        .initialize()
+        .then(() => {
+          setReady(true);
+          setFilterNames(client.getFilterNames());
+        })
+        .catch((err: any) => {
+          // initializeAsync itself rejected (e.g. not running inside Tableau)
+          setInitError(err?.message || String(err));
+        });
     } catch (err: any) {
       setInitError(err?.message || String(err));
     }
   }
 
   useEffect(() => {
+    // SDK should be present immediately (loaded in <head>). Poll briefly as a
+    // safety net in case of unusual load ordering inside the Tableau iframe.
     if (window.tableau) {
       initTableau();
       return;
@@ -50,8 +59,12 @@ export default function ExportPage() {
 
     const giveUp = setTimeout(() => {
       clearInterval(interval);
-      setInitError("Tableau Extensions API failed to load");
-    }, 15000);
+      if (!window.tableau) {
+        setInitError(
+          "window.tableau is not available. The extension must be opened inside a Tableau dashboard, and /tableau-extensions.min.js must be served correctly."
+        );
+      }
+    }, 10000);
 
     return () => {
       clearInterval(interval);
@@ -106,14 +119,8 @@ export default function ExportPage() {
 
   return (
     <>
-      <Script
-        src="/tableau-extensions.min.js"
-        strategy="afterInteractive"
-        onLoad={initTableau}
-        onError={() => setInitError("Failed to load Tableau Extensions API")}
-      />
       <div style={{ padding: 40, maxWidth: 600, margin: "0 auto" }}>
-        <h1>Tableau Bulk PDF Export</h1>
+        <h1>Tableau Pagination</h1>
 
         {initError && (
           <div style={{ background: "#fee", border: "1px solid #fcc", borderRadius: 4, padding: 12, marginBottom: 20 }}>
