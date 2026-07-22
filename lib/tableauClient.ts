@@ -1,15 +1,19 @@
 /**
- * Tableau Extensions API client
- * Handles dashboard context, filter updates, and data queries via VizQL Data Service
+ * Tableau Extensions API client.
+ *
+ * Responsibilities:
+ *  - initialize the extension and grab the first worksheet
+ *  - read the full underlying data table and convert it into plain row objects
+ *    keyed by column name, using each cell's formattedValue (the display string)
+ *  - list available field/column names so the UI can offer a dropdown
+ *
+ * Deliberately does NOT mutate the user's date/channel filters. The only
+ * filter it will touch is the pagination filter, and only via the
+ * save/restore helpers below, so the dashboard is left exactly as it was.
  */
 
-export interface FilterValue {
-  value: string | number;
-  isRelative?: boolean;
-}
-
 export interface DataRow {
-  [key: string]: unknown;
+  [column: string]: string;
 }
 
 export class TableauClient {
@@ -17,97 +21,88 @@ export class TableauClient {
   private worksheet: any;
 
   constructor() {
-    if (!window.tableau) {
+    if (typeof window === "undefined" || !(window as any).tableau) {
       throw new Error("Tableau Extensions API not loaded");
     }
   }
 
-  /**
-   * Initialize Tableau Extensions
-   */
   async initialize(): Promise<void> {
-    await window.tableau.extensions.initializeAsync();
-    this.dashboard = window.tableau.extensions.dashboardContent.dashboard;
+    const tableau = (window as any).tableau;
+    await tableau.extensions.initializeAsync();
+    this.dashboard = tableau.extensions.dashboardContent.dashboard;
     this.worksheet = this.dashboard.worksheets[0];
     if (!this.worksheet) {
-      throw new Error("No worksheets found in dashboard");
+      throw new Error("No worksheets found in this dashboard.");
     }
   }
 
-  /**
-   * Get all worksheets
-   */
-  getWorksheets() {
-    return this.dashboard.worksheets;
+  /** Human-readable worksheet name (for messages). */
+  get worksheetName(): string {
+    return this.worksheet?.name ?? "";
   }
 
   /**
-   * Get data from worksheet (respects current filters)
+   * Read the full underlying data table and return plain row objects keyed by
+   * column name. Each value is the cell's formattedValue (what the user sees).
+   *
+   * maxRows: 0 asks Tableau for all rows (capped by Tableau at 10,000).
    */
-  async getUnderlyingData(maxRows = 10000): Promise<DataRow[]> {
+  async getRows(): Promise<{ columns: string[]; rows: DataRow[]; truncated: boolean }> {
     if (!this.worksheet) throw new Error("No worksheet initialized");
-    const data = await this.worksheet.getUnderlyingDataAsync({ maxRows });
-    return data.data as DataRow[];
-  }
 
-  /**
-   * Get summary data (aggregated, faster)
-   */
-  async getSummaryData(maxRows = 1000): Promise<DataRow[]> {
-    if (!this.worksheet) throw new Error("No worksheet initialized");
-    const data = await this.worksheet.getSummaryDataAsync({ maxRows });
-    return data.data as DataRow[];
-  }
+    const dataTable = await this.worksheet.getUnderlyingDataAsync({
+      maxRows: 0,
+      ignoreSelection: true
+    });
 
-  /**
-   * Apply filter to worksheet (page/pagination filter).
-   * applyFilterAsync requires the values as an array, even for a single value.
-   */
-  async applyFilter(filterName: string, filterValue: string | number): Promise<void> {
-    if (!this.worksheet) throw new Error("No worksheet initialized");
-    await this.worksheet.applyFilterAsync(
-      filterName,
-      [String(filterValue)],
-      window.tableau.FilterUpdateType.Replace
+    const columns: Array<{ fieldName: string; index: number }> = dataTable.columns.map(
+      (c: any) => ({ fieldName: c.fieldName, index: c.index })
     );
+
+    const rows: DataRow[] = dataTable.data.map((rawRow: any[]) => {
+      const row: DataRow = {};
+      for (const col of columns) {
+        const cell = rawRow[col.index];
+        // formattedValue is the display string; fall back to value if absent.
+        const display =
+          cell?.formattedValue ??
+          (cell?.value !== undefined && cell?.value !== null ? String(cell.value) : "");
+        row[col.fieldName] = display;
+      }
+      return row;
+    });
+
+    return {
+      columns: columns.map((c) => c.fieldName),
+      rows,
+      truncated: Boolean(dataTable.isTotalRowCountLimited)
+    };
   }
 
   /**
-   * Clear a filter (show all values)
+   * List the field names available in the underlying data, so the UI can show a
+   * dropdown instead of the user typing a guess.
    */
-  async clearFilter(filterName: string): Promise<void> {
-    if (!this.worksheet) throw new Error("No worksheet initialized");
-    await this.worksheet.applyFilterAsync(filterName, [], window.tableau.FilterUpdateType.All);
-  }
-
-  /**
-   * Get all filter names for this worksheet.
-   * getFiltersAsync is asynchronous and returns a Promise of Filter objects;
-   * each Filter exposes a fieldName.
-   */
-  async getFilterNames(): Promise<string[]> {
+  async getFieldNames(): Promise<string[]> {
     if (!this.worksheet) return [];
-    const filters = await this.worksheet.getFiltersAsync();
-    return filters.map((f: any) => f.fieldName);
+    const dataTable = await this.worksheet.getUnderlyingDataAsync({ maxRows: 1, ignoreSelection: true });
+    return dataTable.columns.map((c: any) => c.fieldName);
   }
 
-  /**
-   * Save canvas state to Tableau settings (extension storage)
-   */
+  /** Persist small bits of config in the extension's settings store. */
   saveState(key: string, state: unknown): void {
-    if (!window.tableau) return;
-    window.tableau.extensions.settings.set(key, JSON.stringify(state));
-    window.tableau.extensions.settings.saveAsync().catch(console.error);
+    const tableau = (window as any).tableau;
+    if (!tableau) return;
+    tableau.extensions.settings.set(key, JSON.stringify(state));
+    tableau.extensions.settings.saveAsync().catch(() => {});
   }
 
-  /**
-   * Load canvas state from Tableau settings
-   */
-  loadState(key: string): unknown | null {
-    if (!window.tableau) return null;
-    const saved = window.tableau.extensions.settings.get(key);
+  loadState<T = unknown>(key: string): T | null {
+    const tableau = (window as any).tableau;
+    if (!tableau) return null;
+    const saved = tableau.extensions.settings.get(key);
     try {
-      return saved ? JSON.parse(saved) : null;
+      return saved ? (JSON.parse(saved) as T) : null;
     } catch {
       return null;
     }
