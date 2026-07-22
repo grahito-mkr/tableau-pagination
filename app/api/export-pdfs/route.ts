@@ -80,7 +80,7 @@ export async function POST(req: NextRequest) {
       zip.file(`page_${pageNum}.pdf`, buffer);
     });
 
-    const zipBuffer = await zip.generateAsync({ type: "nodebuffer" });
+    const zipBuffer = await zip.generateAsync({ type: "arraybuffer" });
 
     // Return as downloadable ZIP
     return new Response(zipBuffer, {
