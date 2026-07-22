@@ -1,47 +1,11 @@
 /**
- * Tableau Extensions API global type definitions
+ * Minimal Tableau Extensions API type surface used by this extension.
+ * The client accesses window.tableau dynamically, so these are light.
  */
+export {};
 
 declare global {
   interface Window {
-    tableau: {
-      extensions: {
-        initializeAsync(): Promise<void>;
-        dashboardContent: {
-          dashboard: {
-            worksheets: Worksheet[];
-          };
-        };
-        settings: {
-          get(key: string): string | null;
-          set(key: string, value: string): void;
-          saveAsync(): Promise<void>;
-        };
-      };
-      FilterUpdateType: {
-        Replace: string;
-        Add: string;
-        All: string;
-      };
-    };
+    tableau?: any;
   }
 }
-
-interface TableauFilter {
-  fieldName: string;
-  filterType: string;
-}
-
-interface Worksheet {
-  name: string;
-  getFiltersAsync(): Promise<TableauFilter[]>;
-  applyFilterAsync(
-    fieldName: string,
-    values: string[],
-    updateType: string
-  ): Promise<void>;
-  getUnderlyingDataAsync(options?: { maxRows: number }): Promise<{ data: Array<Record<string, unknown>> }>;
-  getSummaryDataAsync(options?: { maxRows: number }): Promise<{ data: Array<Record<string, unknown>> }>;
-}
-
-export {};
