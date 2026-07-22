@@ -7,7 +7,7 @@
     <author name="Mekari Data Team" email="data-team-1@mekari.com" organization="Mekari" website="https://mekari.com" />
     <min-api-version>1.4</min-api-version>
     <source-location>
-      <url>https://tableau-export-formula.vercel.app/extension</url>
+      <url>https://tableau-pagination-alpha.vercel.app/extension</url>
     </source-location>
     <icon>iVBORw0KGgoAAAANSUhEUgAAAEYAAABGCAYAAABxLuKEAAAAqElEQVR4nO3QQRGAMADAsDEvU4Z8RDABu77hkSjo9Vr38w4O8+uAvzImGBOMCcYEY4IxwZhgTDAmGBOMCcYEY4IxwZhgTDAmGBOMCcYEY4IxwZhgTDAmGBOMCcYEY4IxwZhgTDAmGBOMCcYEY4IxwZhgTDAmGBOMCcYEY4IxwZhgTDAmGBOMCcYEY4IxwZhgTDAmGBOMCcaEDTc9Av6ih1fOAAAAAElFTkSuQmCC</icon>
     <permissions>
