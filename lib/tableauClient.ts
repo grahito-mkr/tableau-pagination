@@ -64,6 +64,16 @@ export class TableauClient {
   }
 
   /**
+   * Stable ID of the dashboard this extension is running on, used to look up
+   * a per-dashboard config (worksheet name, page size, title, letterhead...)
+   * so end users never have to configure anything themselves — they just
+   * click Export.
+   */
+  get dashboardId(): string {
+    return String(this.dashboard?.id ?? "");
+  }
+
+  /**
    * Read summary data from one worksheet, using the reader API when available.
    * Returns the raw DataTable-shaped object, or null on failure/empty.
    */
