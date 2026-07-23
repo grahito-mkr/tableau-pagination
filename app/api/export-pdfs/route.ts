@@ -10,11 +10,17 @@ interface SignatureEntry {
   name: string;
 }
 
+interface ReportHeader {
+  lines: string[];
+  period?: string;
+}
+
 interface PageData {
   pageNumber: string;
   title: string;
   columns: string[];
   rows: Array<Record<string, string>>;
+  header?: ReportHeader;
   signature?: SignatureEntry[];
 }
 
@@ -128,6 +134,28 @@ function drawPageGroup(doc: PDFKit.PDFDocument, page: PageData, isFirstGroup: bo
   }
 
   const cols = resolveColumns(page.columns);
+
+  const pageStartX = doc.page.margins.left;
+  const pageUsableWidth = doc.page.width - doc.page.margins.left - doc.page.margins.right;
+
+  if (page.header && (page.header.lines.length > 0 || page.header.period)) {
+    page.header.lines.forEach((line, i) => {
+      doc
+        .font("Helvetica-Bold")
+        .fontSize(i === 0 ? 14 : 11)
+        .fillColor("#111")
+        .text(line, pageStartX, doc.y, { width: pageUsableWidth, align: "center" });
+    });
+    if (page.header.period) {
+      doc.moveDown(0.15);
+      doc
+        .font("Helvetica")
+        .fontSize(9)
+        .fillColor("#333")
+        .text(page.header.period, pageStartX, doc.y, { width: pageUsableWidth, align: "center" });
+    }
+    doc.moveDown(0.5);
+  }
 
   doc.fontSize(15).font("Helvetica-Bold").fillColor("#111").text(page.title);
   doc.moveDown(0.4);
