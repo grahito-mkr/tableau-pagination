@@ -27,11 +27,36 @@ export interface PageData {
 }
 
 export interface ExportOptions {
-  /** Column name that holds the page number (e.g. "Page"). */
-  pageField: string;
+  /**
+   * How pages are determined:
+   *  - "field": group by an existing page column's value (pageField).
+   *  - "computeFromNo": there is no Page column in the view, so compute the
+   *    page number from the row number field (numberField) using the same
+   *    formula the dashboard uses:
+   *      Page = if No % 10 == 0 then int(No/5) else int(No/5)+1
+   */
+  mode: "field" | "computeFromNo";
+  /** Column to group by when mode === "field" (e.g. "Page" or "AGG(Page)"). */
+  pageField?: string;
+  /** Column holding the row number when mode === "computeFromNo" (e.g. "AGG(No)"). */
+  numberField?: string;
   /** Base title for each PDF; the page number is appended. */
   titleBase: string;
   onProgress?: (message: string) => void;
+}
+
+/** Replicates the dashboard's Page calc exactly. */
+function computePage(no: number): number {
+  return no % 10 === 0 ? Math.trunc(no / 5) : Math.trunc(no / 5) + 1;
+}
+
+/** Parse a numeric value out of a formatted cell string like "1,234" or "12". */
+function parseNumber(value: string): number | null {
+  if (value == null) return null;
+  const cleaned = String(value).replace(/[^0-9.-]/g, "");
+  if (cleaned === "" || cleaned === "-") return null;
+  const n = Number(cleaned);
+  return Number.isFinite(n) ? n : null;
 }
 
 export class ExportOrchestrator {
@@ -41,7 +66,7 @@ export class ExportOrchestrator {
    * Build the per-page payload from the underlying data.
    */
   async buildPages(options: ExportOptions): Promise<{ pages: PageData[]; truncated: boolean }> {
-    const { pageField, titleBase, onProgress } = options;
+    const { mode, pageField, numberField, titleBase, onProgress } = options;
 
     onProgress?.("Reading data...");
     const { columns, rows, truncated } = await this.client.getRows();
@@ -52,20 +77,39 @@ export class ExportOrchestrator {
       );
     }
 
-    if (!columns.includes(pageField)) {
+    // Determine which column we read, and validate it exists.
+    const sourceField = mode === "computeFromNo" ? numberField : pageField;
+    if (!sourceField || !columns.includes(sourceField)) {
       throw new Error(
-        `Field "${pageField}" was not found. Available fields: ${columns.join(", ")}`
+        `Field "${sourceField}" was not found. Available fields: ${columns.join(", ")}`
       );
     }
 
     onProgress?.("Grouping by page...");
 
-    // Group rows by their page value, preserving first-seen order.
+    // Compute a page key for each row depending on the mode.
+    const keyForRow = (row: DataRow): string => {
+      if (mode === "computeFromNo") {
+        const no = parseNumber(row[sourceField]);
+        return no == null ? "" : String(computePage(no));
+      }
+      return row[sourceField] ?? "";
+    };
+
+    // Group rows by page key, preserving first-seen order.
     const groups = new Map<string, DataRow[]>();
     for (const row of rows) {
-      const key = row[pageField] ?? "";
+      const key = keyForRow(row);
+      if (key === "") continue; // skip rows we can't place
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key)!.push(row);
+    }
+
+    if (groups.size === 0) {
+      throw new Error(
+        `Could not determine any page numbers from "${sourceField}". ` +
+          `Check that the selected field contains numeric row numbers.`
+      );
     }
 
     // Sort page keys numerically when possible, else lexically.
@@ -84,7 +128,7 @@ export class ExportOrchestrator {
     if (sortedKeys.length > MAX_PAGES) {
       const sample = sortedKeys.slice(0, 8).join(", ");
       throw new Error(
-        `Field "${pageField}" has ${sortedKeys.length} distinct values, which is too many to be page numbers ` +
+        `Field "${sourceField}" has ${sortedKeys.length} distinct values, which is too many to be page numbers ` +
           `(sample: ${sample}...). Pick the field that holds the PAGE number ` +
           `(often shown as "AGG(Page)"), not a per-row id like "No".`
       );
