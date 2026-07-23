@@ -160,7 +160,7 @@ export default function ExportPage() {
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `export-${new Date().toISOString().slice(0, 10)}.zip`;
+      a.download = `export-${new Date().toISOString().slice(0, 10)}.pdf`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -324,7 +324,7 @@ export default function ExportPage() {
               cursor: busy ? "not-allowed" : "pointer"
             }}
           >
-            {busy ? "Exporting..." : "Export All Pages as ZIP"}
+            {busy ? "Exporting..." : "Export All Pages as PDF"}
           </button>
         </>
       )}
