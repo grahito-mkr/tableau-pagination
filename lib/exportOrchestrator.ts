@@ -191,7 +191,7 @@ export class ExportOrchestrator {
   }
 
   /**
-   * Full export: build pages, POST to backend, return the ZIP blob.
+   * Full export: build pages, POST to backend, return the PDF blob.
    */
   async export(options: ExportOptions): Promise<Blob> {
     const { pages, truncated } = await this.buildPages(options);
