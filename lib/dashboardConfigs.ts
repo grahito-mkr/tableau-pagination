@@ -37,7 +37,7 @@ export interface DashboardConfig {
 
 export const DASHBOARD_CONFIGS: Record<string, DashboardConfig> = {
   // Double Tree by Hilton Jakarta Bintaro Raya — Salary report.
-  "24dd8159-b3b0-4803-b5cf-e08a65c6b897": {
+  "f5dbc038-1dc4-4319-ab17-d9fe608e5684": {
     worksheetName: "Salary Report Pagination",
     pageSize: 5,
     titleBase: "Report",
