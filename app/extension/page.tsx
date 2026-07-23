@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { TableauClient } from "@/lib/tableauClient";
 import { ExportOrchestrator, type ExportOptions } from "@/lib/exportOrchestrator";
 
@@ -11,6 +11,8 @@ export default function ExportPage() {
   const [ready, setReady] = useState(false);
   const [initError, setInitError] = useState<string | null>(null);
   const [fields, setFields] = useState<string[]>([]);
+  const [worksheets, setWorksheets] = useState<string[]>([]);
+  const [worksheet, setWorksheet] = useState("");
   const [mode, setMode] = useState<Mode>("field");
   const [numberField, setNumberField] = useState("");
   const [pageField, setPageField] = useState("");
@@ -20,38 +22,64 @@ export default function ExportPage() {
   const [message, setMessage] = useState("");
   const [error, setError] = useState<string | null>(null);
 
+  // Single long-lived client so a worksheet choice made in the picker is
+  // still in effect when Export is clicked.
+  const clientRef = useRef<TableauClient | null>(null);
+
+  /** Re-read field names for whichever worksheet is currently selected, and
+   * re-run the auto-detection of page/row-number fields against it. */
+  async function refreshFieldsForCurrentWorksheet(client: TableauClient) {
+    const names = await client.getFieldNames();
+    setFields(names);
+    setWorksheet(client.worksheetName);
+
+    const pageMatch = findPageField(names);
+    const noMatch = findInner(names, "no");
+
+    if (pageMatch) {
+      setMode("field");
+      setPageField(pageMatch);
+    } else if (noMatch) {
+      setMode("computeFromNo");
+      setNumberField(noMatch);
+    } else if (names.length > 0) {
+      setMode("field");
+      setPageField(names[0]);
+      setNumberField(names[0]);
+    } else {
+      setPageField("");
+      setNumberField("");
+    }
+  }
+
   function initTableau() {
     if (!(window as any).tableau) return;
     const client = new TableauClient();
+    clientRef.current = client;
     client
       .initialize()
       .then(async () => {
         setReady(true);
+        setWorksheets(client.getWorksheetNames());
         try {
-          const names = await client.getFieldNames();
-          setFields(names);
-
-          // Prefer an existing page field on the view — this is portable and
-          // uses the dashboard's own formula. Match "page", "page number", etc.
-          const pageMatch = findPageField(names);
-          const noMatch = findInner(names, "no");
-
-          if (pageMatch) {
-            setMode("field");
-            setPageField(pageMatch);
-          } else if (noMatch) {
-            // No page column present: fall back to computing from No.
-            setMode("computeFromNo");
-            setNumberField(noMatch);
-          } else if (names.length > 0) {
-            setMode("field");
-            setPageField(names[0]);
-          }
+          await refreshFieldsForCurrentWorksheet(client);
         } catch {
           /* best effort */
         }
       })
       .catch((err: any) => setInitError(err?.message || String(err)));
+  }
+
+  async function handleWorksheetChange(name: string) {
+    const client = clientRef.current;
+    if (!client) return;
+    client.selectWorksheet(name);
+    setWorksheet(name);
+    try {
+      await refreshFieldsForCurrentWorksheet(client);
+    } catch {
+      /* best effort */
+    }
   }
 
   /** Inner name inside an aggregation wrapper, e.g. "AGG(Page)" -> "page". */
@@ -109,8 +137,13 @@ export default function ExportPage() {
     setMessage("Starting...");
 
     try {
-      const client = new TableauClient();
-      await client.initialize();
+      let client = clientRef.current;
+      if (!client) {
+        client = new TableauClient();
+        await client.initialize();
+        clientRef.current = client;
+      }
+      if (worksheet) client.selectWorksheet(worksheet);
       const orchestrator = new ExportOrchestrator(client);
 
       const opts: ExportOptions = {
@@ -179,6 +212,26 @@ export default function ExportPage() {
           >
             Before exporting, set the dashboard's <strong>Page</strong> control to <strong>(All)</strong> so
             every page's rows are included. Your date and channel filters are left untouched.
+          </div>
+
+          <label style={{ display: "block", fontWeight: 600, marginBottom: 4 }}>Worksheet</label>
+          <select
+            value={worksheet}
+            onChange={(e) => handleWorksheetChange(e.target.value)}
+            style={inputStyle}
+          >
+            {worksheets.length === 0 && <option value="">No worksheets found</option>}
+            {worksheets.map((w) => (
+              <option key={w} value={w}>
+                {w}
+              </option>
+            ))}
+          </select>
+          <div style={{ fontSize: 12, color: "#666", marginBottom: 16 }}>
+            The worksheet the extension reads columns from. Pick the one that has{" "}
+            <strong>every column you want in the PDF</strong> on its Marks card (Rows/Columns/Detail) —
+            not just the page or row-number field. If a field you expect is missing below, this is usually
+            the wrong worksheet.
           </div>
 
           <label style={{ display: "block", fontWeight: 600, marginBottom: 4 }}>How are pages defined?</label>
