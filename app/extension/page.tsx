@@ -11,9 +11,10 @@ export default function ExportPage() {
   const [ready, setReady] = useState(false);
   const [initError, setInitError] = useState<string | null>(null);
   const [fields, setFields] = useState<string[]>([]);
-  const [mode, setMode] = useState<Mode>("computeFromNo");
+  const [mode, setMode] = useState<Mode>("field");
   const [numberField, setNumberField] = useState("");
   const [pageField, setPageField] = useState("");
+  const [pageSize, setPageSize] = useState(5);
   const [titleBase, setTitleBase] = useState("Report");
   const [status, setStatus] = useState<Status>("idle");
   const [message, setMessage] = useState("");
@@ -30,15 +31,16 @@ export default function ExportPage() {
           const names = await client.getFieldNames();
           setFields(names);
 
-          // Prefer an explicit page field if one is actually on the view.
-          const pageMatch = findInner(names, "page");
+          // Prefer an existing page field on the view — this is portable and
+          // uses the dashboard's own formula. Match "page", "page number", etc.
+          const pageMatch = findPageField(names);
           const noMatch = findInner(names, "no");
 
           if (pageMatch) {
             setMode("field");
             setPageField(pageMatch);
           } else if (noMatch) {
-            // No Page column in the view (common): compute it from No.
+            // No page column present: fall back to computing from No.
             setMode("computeFromNo");
             setNumberField(noMatch);
           } else if (names.length > 0) {
@@ -52,13 +54,27 @@ export default function ExportPage() {
       .catch((err: any) => setInitError(err?.message || String(err)));
   }
 
-  /** Find a field whose inner name (inside AGG(...) etc.) equals target. */
+  /** Inner name inside an aggregation wrapper, e.g. "AGG(Page)" -> "page". */
+  function innerName(n: string): string {
+    const m = n.match(/\(([^)]+)\)\s*$/);
+    return (m ? m[1] : n).trim().toLowerCase();
+  }
+
+  /** Find a field whose inner name equals target exactly. */
   function findInner(names: string[], target: string): string | undefined {
-    const inner = (n: string) => {
-      const m = n.match(/\(([^)]+)\)\s*$/);
-      return (m ? m[1] : n).trim().toLowerCase();
+    return names.find((n) => innerName(n) === target);
+  }
+
+  /**
+   * Find the best "page" field. Matches "page" or "page number" (but not
+   * "page size"), tolerating the AGG(...) wrapper.
+   */
+  function findPageField(names: string[]): string | undefined {
+    const isPage = (n: string) => {
+      const inner = innerName(n);
+      return inner === "page" || inner === "page number" || inner === "pagenumber";
     };
-    return names.find((n) => inner(n) === target);
+    return names.find(isPage);
   }
 
   useEffect(() => {
@@ -102,6 +118,7 @@ export default function ExportPage() {
         titleBase,
         pageField: mode === "field" ? pageField : undefined,
         numberField: mode === "computeFromNo" ? numberField : undefined,
+        pageSize: mode === "computeFromNo" ? pageSize : undefined,
         onProgress: (m) => setMessage(m)
       };
 
@@ -166,12 +183,13 @@ export default function ExportPage() {
 
           <label style={{ display: "block", fontWeight: 600, marginBottom: 4 }}>How are pages defined?</label>
           <select value={mode} onChange={(e) => setMode(e.target.value as Mode)} style={inputStyle}>
+            <option value="field">Use an existing Page column (recommended)</option>
             <option value="computeFromNo">Compute from row number (No)</option>
-            <option value="field">Use an existing Page column</option>
           </select>
           <div style={{ fontSize: 12, color: "#666", marginBottom: 16 }}>
-            Your dashboard computes Page as <code>ceil(No / 5)</code>; the Page column isn't in the data
-            feed, so the row-number option is the reliable choice.
+            Recommended: expose the dashboard's own page calc on the worksheet (drag it onto Marks →
+            Detail) and select it here — it works on any dashboard regardless of its page formula. Only
+            use "Compute from row number" if no page field is available.
           </div>
 
           {mode === "computeFromNo" ? (
@@ -186,7 +204,19 @@ export default function ExportPage() {
                 ))}
               </select>
               <div style={{ fontSize: 12, color: "#666", marginBottom: 16 }}>
-                The field with the lead number (usually <code>AGG(No)</code>). Page = ceil(No / 5).
+                The field with the row number (usually <code>AGG(No)</code>).
+              </div>
+
+              <label style={{ display: "block", fontWeight: 600, marginBottom: 4 }}>Page Size</label>
+              <input
+                type="number"
+                min={1}
+                value={pageSize}
+                onChange={(e) => setPageSize(Math.max(1, parseInt(e.target.value || "1", 10)))}
+                style={inputStyle}
+              />
+              <div style={{ fontSize: 12, color: "#666", marginBottom: 16 }}>
+                Rows per page — must match the dashboard's Page Size. Page = <code>INT((No − 1) / Page Size) + 1</code>.
               </div>
             </>
           ) : (
@@ -201,7 +231,8 @@ export default function ExportPage() {
                 ))}
               </select>
               <div style={{ fontSize: 12, color: "#666", marginBottom: 16 }}>
-                The field that holds the page number (one PDF per distinct value).
+                The field that holds the page number (one PDF per distinct value). Uses the dashboard's own
+                formula, so it adapts automatically if the Page Size parameter changes.
               </div>
             </>
           )}
