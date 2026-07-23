@@ -120,17 +120,17 @@ export class ExportOrchestrator {
       return a.localeCompare(b);
     });
 
-    // Sanity guard: the page field should have a small number of distinct
-    // values (one per visual page). If it produced hundreds/thousands, the
-    // wrong field was selected (e.g. a per-row id like "No"). Stop and explain
-    // instead of generating thousands of PDFs.
-    const MAX_PAGES = 200;
-    if (sortedKeys.length > MAX_PAGES) {
+    // Sanity guard: catch an obviously-wrong field (e.g. a unique per-row id
+    // that would yield one "page" per row). Legitimate reports here can have
+    // ~1000 pages, so the ceiling is high; it only trips on clearly-wrong input
+    // where distinct values approach the row count.
+    const distinctRatio = sortedKeys.length / rows.length;
+    if (sortedKeys.length > 2000 || (sortedKeys.length > 300 && distinctRatio > 0.9)) {
       const sample = sortedKeys.slice(0, 8).join(", ");
       throw new Error(
-        `Field "${sourceField}" has ${sortedKeys.length} distinct values, which is too many to be page numbers ` +
-          `(sample: ${sample}...). Pick the field that holds the PAGE number ` +
-          `(often shown as "AGG(Page)"), not a per-row id like "No".`
+        `Field produced ${sortedKeys.length} groups from ${rows.length} rows ` +
+          `(sample: ${sample}...). That looks like a per-row id rather than a page number. ` +
+          `If you meant to compute pages from the row number, choose "Compute from row number".`
       );
     }
 
