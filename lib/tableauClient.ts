@@ -166,6 +166,33 @@ export class TableauClient {
     }
   }
 
+  /**
+   * Read the current value of one or more dashboard Parameters (not
+   * worksheet fields — e.g. the "Admin & Payroll" / "DOF" / "DOHR" / "GM"
+   * dropdowns that drive a signature block). Returns a map of parameter name
+   * -> formatted current value. Missing parameters are simply omitted from
+   * the result rather than throwing, so a signature block can degrade
+   * gracefully instead of failing the whole export.
+   */
+  async getParameterValues(names: string[]): Promise<Record<string, string>> {
+    const tableau = (window as any).tableau;
+    if (!tableau) return {};
+    try {
+      const params = await tableau.extensions.dashboardContent.dashboard.getParametersAsync();
+      const wanted = new Set(names.map((n) => n.toLowerCase()));
+      const result: Record<string, string> = {};
+      for (const p of params) {
+        if (wanted.has(String(p.name).toLowerCase())) {
+          const v = p.currentValue;
+          result[p.name] = v?.formattedValue ?? String(v?.value ?? "");
+        }
+      }
+      return result;
+    } catch {
+      return {};
+    }
+  }
+
   saveState(key: string, state: unknown): void {
     const tableau = (window as any).tableau;
     if (!tableau) return;
