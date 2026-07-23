@@ -53,13 +53,13 @@ function cleanLabel(source: string): string {
 const PREFERRED_COLUMNS: Array<{ label: string; match: string[]; width?: number }> = [
   { label: "No", match: ["no"] },
   { label: "Employee ID", match: ["employee id"] },
-  { label: "Employee Name", match: ["employee name"] },
-  { label: "Organization", match: ["organization"] },
+  { label: "Employee Name", match: ["employee name"], width: 20 },
+  { label: "Organization", match: ["organization"], width: 20 },
   { label: "PTKP", match: ["ptkp"] },
   { label: "Employee Tax Status", match: ["employee tax status"] },
   { label: "Join Date", match: ["join date"] },
   { label: "Component", match: ["component", "measure names"], width: 16 },
-  { label: "Amount", match: ["amount", "measure values", "total_amount", "total amount"], width: 26 }
+  { label: "Amount", match: ["amount", "measure values", "total_amount", "total amount"], width: 20 }
 ];
 
 /**
