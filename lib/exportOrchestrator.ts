@@ -38,11 +38,28 @@ const SIGNATURE_SPEC: Array<{ title: string; role: string }> = [
   { title: "Acknowledged by", role: "GM" }
 ];
 
+/**
+ * Names of the two Tableau Parameters that drive the "Period X to Y" line
+ * shown on the dashboard. Best-effort: if these parameters don't exist on a
+ * given dashboard, the period line is simply omitted.
+ */
+const PERIOD_PARAMS = { start: "Start Date", end: "End Date" };
+
+/** Static letterhead lines (company name, report title, ...) plus the
+ * resolved "Period X to Y" line, repeated on every page like the dashboard's
+ * own header. */
+export interface ReportHeader {
+  lines: string[];
+  period?: string;
+}
+
 export interface PageData {
   pageNumber: string;
   title: string;
   columns: string[];
   rows: DataRow[];
+  /** Repeated on every page — mirrors the dashboard's own letterhead. */
+  header?: ReportHeader;
   /** Present only on the last page of the whole export; rendered as a
    * sign-off block after the table on that page's final PDF page. */
   signature?: SignatureEntry[];
@@ -71,6 +88,10 @@ export interface ExportOptions {
   pageSize?: number;
   /** Base title for each PDF; the page number is appended. */
   titleBase: string;
+  /** Static letterhead lines (e.g. company name, report title) shown at the
+   * top of every page, above the "Period X to Y" line (auto-fetched from the
+   * Start Date/End Date parameters). Leave empty/omit to show no letterhead. */
+  headerLines?: string[];
   onProgress?: (message: string) => void;
 }
 
@@ -99,7 +120,7 @@ export class ExportOrchestrator {
    * Build the per-page payload from the underlying data.
    */
   async buildPages(options: ExportOptions): Promise<{ pages: PageData[]; truncated: boolean }> {
-    const { mode, pageField, numberField, titleBase, onProgress } = options;
+    const { mode, pageField, numberField, titleBase, headerLines, onProgress } = options;
     const pageSize = options.pageSize && options.pageSize > 0 ? options.pageSize : 5;
 
     onProgress?.("Reading data...");
@@ -174,6 +195,22 @@ export class ExportOrchestrator {
       columns,
       rows: groups.get(key)!
     }));
+
+    // Letterhead header: static lines from the UI, plus the "Period X to Y"
+    // line auto-resolved from the Start Date/End Date Parameters (best
+    // effort — omitted if those parameters don't exist on this dashboard).
+    // Repeated on every page, mirroring the dashboard's own header.
+    const staticLines = (headerLines ?? []).map((l) => l.trim()).filter(Boolean);
+    onProgress?.("Reading report header...");
+    const periodValues = await this.client.getParameterValues([PERIOD_PARAMS.start, PERIOD_PARAMS.end]);
+    const periodStart = periodValues[PERIOD_PARAMS.start];
+    const periodEnd = periodValues[PERIOD_PARAMS.end];
+    const period = periodStart && periodEnd ? `Period ${periodStart} to ${periodEnd}` : undefined;
+
+    if (staticLines.length > 0 || period) {
+      const header: ReportHeader = { lines: staticLines, period };
+      for (const p of pages) p.header = header;
+    }
 
     // Signature block: read the four sign-off Parameters (best effort — if
     // they're missing on this dashboard, the block is simply omitted rather
