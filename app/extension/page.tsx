@@ -26,13 +26,34 @@ export default function ExportPage() {
         try {
           const names = await client.getFieldNames();
           setFields(names);
-          if (names.includes("Page")) setPageField("Page");
-          else if (names.length > 0) setPageField(names[0]);
+          setPageField(pickPageField(names));
         } catch {
           /* field list is best-effort */
         }
       })
       .catch((err: any) => setInitError(err?.message || String(err)));
+  }
+
+  /**
+   * Choose the best "page" field. Summary-data fields come back wrapped in
+   * their aggregation, e.g. "AGG(Page)" rather than "Page", so we match on the
+   * inner name. We deliberately avoid matching "No" (a different calc) and
+   * prefer a field whose inner name is exactly "page".
+   */
+  function pickPageField(names: string[]): string {
+    const inner = (n: string) => {
+      const m = n.match(/\(([^)]+)\)\s*$/); // pull "Page" out of "AGG(Page)"
+      return (m ? m[1] : n).trim().toLowerCase();
+    };
+    // 1. exact inner match "page"
+    const exact = names.find((n) => inner(n) === "page");
+    if (exact) return exact;
+    // 2. inner name contains "page" but not "no"
+    const contains = names.find((n) => inner(n).includes("page"));
+    if (contains) return contains;
+    // 3. fall back to the first field, but never silently pick a "No" field
+    const nonNo = names.find((n) => inner(n) !== "no");
+    return nonNo ?? names[0] ?? "Page";
   }
 
   useEffect(() => {
