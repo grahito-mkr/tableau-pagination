@@ -2,15 +2,18 @@
 
 import { useEffect, useState } from "react";
 import { TableauClient } from "@/lib/tableauClient";
-import { ExportOrchestrator } from "@/lib/exportOrchestrator";
+import { ExportOrchestrator, type ExportOptions } from "@/lib/exportOrchestrator";
 
 type Status = "idle" | "working" | "done" | "error";
+type Mode = "computeFromNo" | "field";
 
 export default function ExportPage() {
   const [ready, setReady] = useState(false);
   const [initError, setInitError] = useState<string | null>(null);
   const [fields, setFields] = useState<string[]>([]);
-  const [pageField, setPageField] = useState("Page");
+  const [mode, setMode] = useState<Mode>("computeFromNo");
+  const [numberField, setNumberField] = useState("");
+  const [pageField, setPageField] = useState("");
   const [titleBase, setTitleBase] = useState("Report");
   const [status, setStatus] = useState<Status>("idle");
   const [message, setMessage] = useState("");
@@ -26,34 +29,36 @@ export default function ExportPage() {
         try {
           const names = await client.getFieldNames();
           setFields(names);
-          setPageField(pickPageField(names));
+
+          // Prefer an explicit page field if one is actually on the view.
+          const pageMatch = findInner(names, "page");
+          const noMatch = findInner(names, "no");
+
+          if (pageMatch) {
+            setMode("field");
+            setPageField(pageMatch);
+          } else if (noMatch) {
+            // No Page column in the view (common): compute it from No.
+            setMode("computeFromNo");
+            setNumberField(noMatch);
+          } else if (names.length > 0) {
+            setMode("field");
+            setPageField(names[0]);
+          }
         } catch {
-          /* field list is best-effort */
+          /* best effort */
         }
       })
       .catch((err: any) => setInitError(err?.message || String(err)));
   }
 
-  /**
-   * Choose the best "page" field. Summary-data fields come back wrapped in
-   * their aggregation, e.g. "AGG(Page)" rather than "Page", so we match on the
-   * inner name. We deliberately avoid matching "No" (a different calc) and
-   * prefer a field whose inner name is exactly "page".
-   */
-  function pickPageField(names: string[]): string {
+  /** Find a field whose inner name (inside AGG(...) etc.) equals target. */
+  function findInner(names: string[], target: string): string | undefined {
     const inner = (n: string) => {
-      const m = n.match(/\(([^)]+)\)\s*$/); // pull "Page" out of "AGG(Page)"
+      const m = n.match(/\(([^)]+)\)\s*$/);
       return (m ? m[1] : n).trim().toLowerCase();
     };
-    // 1. exact inner match "page"
-    const exact = names.find((n) => inner(n) === "page");
-    if (exact) return exact;
-    // 2. inner name contains "page" but not "no"
-    const contains = names.find((n) => inner(n).includes("page"));
-    if (contains) return contains;
-    // 3. fall back to the first field, but never silently pick a "No" field
-    const nonNo = names.find((n) => inner(n) !== "no");
-    return nonNo ?? names[0] ?? "Page";
+    return names.find((n) => inner(n) === target);
   }
 
   useEffect(() => {
@@ -92,11 +97,15 @@ export default function ExportPage() {
       await client.initialize();
       const orchestrator = new ExportOrchestrator(client);
 
-      const blob = await orchestrator.export({
-        pageField,
+      const opts: ExportOptions = {
+        mode,
         titleBase,
+        pageField: mode === "field" ? pageField : undefined,
+        numberField: mode === "computeFromNo" ? numberField : undefined,
         onProgress: (m) => setMessage(m)
-      });
+      };
+
+      const blob = await orchestrator.export(opts);
 
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -116,6 +125,14 @@ export default function ExportPage() {
   }
 
   const busy = status === "working";
+  const inputStyle = {
+    width: "100%",
+    padding: 8,
+    borderRadius: 6,
+    border: "1px solid #ccc",
+    boxSizing: "border-box" as const,
+    marginBottom: 4
+  };
 
   return (
     <div style={{ padding: 32, maxWidth: 560, margin: "0 auto", fontSize: 14 }}>
@@ -147,36 +164,50 @@ export default function ExportPage() {
             every page's rows are included. Your date and channel filters are left untouched.
           </div>
 
-          <label style={{ display: "block", fontWeight: 600, marginBottom: 4 }}>Page Field</label>
-          {fields.length > 0 ? (
-            <select
-              value={pageField}
-              onChange={(e) => setPageField(e.target.value)}
-              style={{ width: "100%", padding: 8, borderRadius: 6, border: "1px solid #ccc", marginBottom: 4 }}
-            >
-              {fields.map((f) => (
-                <option key={f} value={f}>
-                  {f}
-                </option>
-              ))}
-            </select>
-          ) : (
-            <input
-              value={pageField}
-              onChange={(e) => setPageField(e.target.value)}
-              style={{ width: "100%", padding: 8, borderRadius: 6, border: "1px solid #ccc", marginBottom: 4, boxSizing: "border-box" }}
-            />
-          )}
+          <label style={{ display: "block", fontWeight: 600, marginBottom: 4 }}>How are pages defined?</label>
+          <select value={mode} onChange={(e) => setMode(e.target.value as Mode)} style={inputStyle}>
+            <option value="computeFromNo">Compute from row number (No)</option>
+            <option value="field">Use an existing Page column</option>
+          </select>
           <div style={{ fontSize: 12, color: "#666", marginBottom: 16 }}>
-            The field that holds the page number (one PDF is produced per distinct value).
+            Your dashboard computes Page as <code>ceil(No / 5)</code>; the Page column isn't in the data
+            feed, so the row-number option is the reliable choice.
           </div>
 
+          {mode === "computeFromNo" ? (
+            <>
+              <label style={{ display: "block", fontWeight: 600, marginBottom: 4 }}>Row Number Field</label>
+              <select value={numberField} onChange={(e) => setNumberField(e.target.value)} style={inputStyle}>
+                {fields.length === 0 && <option value="">No fields found</option>}
+                {fields.map((f) => (
+                  <option key={f} value={f}>
+                    {f}
+                  </option>
+                ))}
+              </select>
+              <div style={{ fontSize: 12, color: "#666", marginBottom: 16 }}>
+                The field with the lead number (usually <code>AGG(No)</code>). Page = ceil(No / 5).
+              </div>
+            </>
+          ) : (
+            <>
+              <label style={{ display: "block", fontWeight: 600, marginBottom: 4 }}>Page Field</label>
+              <select value={pageField} onChange={(e) => setPageField(e.target.value)} style={inputStyle}>
+                {fields.length === 0 && <option value="">No fields found</option>}
+                {fields.map((f) => (
+                  <option key={f} value={f}>
+                    {f}
+                  </option>
+                ))}
+              </select>
+              <div style={{ fontSize: 12, color: "#666", marginBottom: 16 }}>
+                The field that holds the page number (one PDF per distinct value).
+              </div>
+            </>
+          )}
+
           <label style={{ display: "block", fontWeight: 600, marginBottom: 4 }}>PDF Title</label>
-          <input
-            value={titleBase}
-            onChange={(e) => setTitleBase(e.target.value)}
-            style={{ width: "100%", padding: 8, borderRadius: 6, border: "1px solid #ccc", marginBottom: 4, boxSizing: "border-box" }}
-          />
+          <input value={titleBase} onChange={(e) => setTitleBase(e.target.value)} style={inputStyle} />
           <div style={{ fontSize: 12, color: "#666", marginBottom: 20 }}>
             Base title for each PDF (the page number is appended).
           </div>
