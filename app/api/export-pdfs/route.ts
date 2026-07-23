@@ -16,23 +16,6 @@ interface ExportRequest {
   pages: PageData[];
 }
 
-/**
- * Column order for the PDF using CLEAN display labels. Each entry lists the
- * possible source names (summary data wraps calcs, e.g. "AGG(No)"); the first
- * that exists is used. `group: true` means the cell is blanked when it repeats
- * the row above — mimicking the dashboard's merged No / Channel cells.
- */
-const COLUMN_SPEC: Array<{ label: string; sources: string[]; group?: boolean; width: number }> = [
-  { label: "No", sources: ["No", "AGG(No)", "SUM(No)", "ATTR(No)"], group: true, width: 0.045 },
-  { label: "Channel", sources: ["Channel"], group: true, width: 0.09 },
-  { label: "Contact Name", sources: ["Contact Name"], width: 0.13 },
-  { label: "Nomer Telp/User ID", sources: ["Nomer Telp/User ID"], width: 0.12 },
-  { label: "Omni Channel Contact Link", sources: ["Omni Channel Contact Link"], width: 0.19 },
-  { label: "CRM Contact Link", sources: ["CRM Contact Link"], width: 0.115 },
-  { label: "Link Room ID", sources: ["Link Room ID"], width: 0.19 },
-  { label: "Tagging Omni Channel", sources: ["Tagging Omni Channel"], width: 0.12 }
-];
-
 interface ResolvedCol {
   label: string;
   source: string;
@@ -40,17 +23,69 @@ interface ResolvedCol {
   width: number;
 }
 
+/** Strip a Tableau aggregation wrapper, e.g. "AGG(Employee ID)" -> "Employee ID". */
+function cleanLabel(source: string): string {
+  const m = source.match(/^[A-Za-z]+\(([^)]+)\)\s*$/);
+  return (m ? m[1] : source).trim();
+}
+
+/**
+ * Preferred column order/labels for the Salary report. Listed in the order
+ * they should appear in the PDF. `match` lists the possible cleaned inner
+ * names (case-insensitive) that should map to this column — this covers the
+ * literal field name plus the Measure Names/Measure Values aliases Tableau
+ * uses when "Component" is really a pivoted measure column.
+ */
+const PREFERRED_COLUMNS: Array<{ label: string; match: string[] }> = [
+  { label: "No", match: ["no"] },
+  { label: "Employee ID", match: ["employee id"] },
+  { label: "Employee Name", match: ["employee name"] },
+  { label: "Organization", match: ["organization"] },
+  { label: "PTKP", match: ["ptkp"] },
+  { label: "Employee Tax Status", match: ["employee tax status"] },
+  { label: "Join Date", match: ["join date"] },
+  { label: "Component", match: ["component", "measure names"] },
+  { label: "Amount", match: ["amount", "measure values", "total_amount", "total amount"] }
+];
+
+function widthFor(label: string): number {
+  const isNoCol = /^no$/i.test(label);
+  let weight = isNoCol ? 4 : Math.max(label.length, 6);
+  if (/link|url/i.test(label)) weight += 20;
+  return weight;
+}
+
+/**
+ * Build PDF columns from whatever fields the selected worksheet actually
+ * returned. Fields matching PREFERRED_COLUMNS are placed first, in that
+ * order, using the pinned label. Any remaining returned field not covered by
+ * PREFERRED_COLUMNS is appended afterward in its original order — so other
+ * dashboards (with a different schema) still get every column rendered
+ * instead of silently dropping anything.
+ * Every column is eligible for "grouping" (its cell is blanked when it
+ * repeats the row directly above within the same row-number group), which
+ * mimics Tableau's own merged-cell look for repeated dimension values.
+ */
 function resolveColumns(available: string[]): ResolvedCol[] {
+  const used = new Set<string>();
   const resolved: ResolvedCol[] = [];
-  for (const spec of COLUMN_SPEC) {
-    const source = spec.sources.find((s) => available.includes(s));
+
+  for (const pref of PREFERRED_COLUMNS) {
+    const source = available.find(
+      (a) => !used.has(a) && pref.match.includes(cleanLabel(a).toLowerCase())
+    );
     if (source) {
-      resolved.push({ label: spec.label, source, group: Boolean(spec.group), width: spec.width });
+      used.add(source);
+      resolved.push({ label: pref.label, source, group: true, width: widthFor(pref.label) });
     }
   }
-  if (resolved.length === 0) {
-    return available.map((a) => ({ label: a, source: a, group: false, width: 1 / available.length }));
+
+  for (const source of available) {
+    if (used.has(source)) continue;
+    const label = cleanLabel(source);
+    resolved.push({ label, source, group: true, width: widthFor(label) });
   }
+
   return resolved;
 }
 
