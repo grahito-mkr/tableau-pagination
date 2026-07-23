@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
 import PDFDocument from "pdfkit";
-import JSZip from "jszip";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -118,105 +117,104 @@ function resolveColumns(available: string[]): ResolvedCol[] {
   return resolved;
 }
 
-function generatePDF(page: PageData): Promise<Buffer> {
-  return new Promise((resolve, reject) => {
-    const doc = new PDFDocument({ margin: 30, size: "A4", layout: "landscape" });
-    const chunks: Buffer[] = [];
-    doc.on("data", (c: Buffer) => chunks.push(c));
-    doc.on("end", () => resolve(Buffer.concat(chunks)));
-    doc.on("error", reject);
+/**
+ * Draws one page-group's table (header, rows, optional trailing signature
+ * block) onto a shared PDFDocument, starting a fresh physical page first
+ * unless this is the very first group in the document.
+ */
+function drawPageGroup(doc: PDFKit.PDFDocument, page: PageData, isFirstGroup: boolean): void {
+  if (!isFirstGroup) {
+    doc.addPage({ margin: 30, size: "A4", layout: "landscape" });
+  }
 
-    const cols = resolveColumns(page.columns);
+  const cols = resolveColumns(page.columns);
 
-    doc.fontSize(15).font("Helvetica-Bold").fillColor("#111").text(page.title);
-    doc.moveDown(0.4);
+  doc.fontSize(15).font("Helvetica-Bold").fillColor("#111").text(page.title);
+  doc.moveDown(0.4);
 
-    const startX = doc.page.margins.left;
-    const usableWidth = doc.page.width - doc.page.margins.left - doc.page.margins.right;
+  const startX = doc.page.margins.left;
+  const usableWidth = doc.page.width - doc.page.margins.left - doc.page.margins.right;
 
-    const totalW = cols.reduce((s, c) => s + c.width, 0);
-    const colX: number[] = [];
-    const colW: number[] = [];
-    let acc = startX;
-    for (const c of cols) {
-      const w = (c.width / totalW) * usableWidth;
-      colX.push(acc);
-      colW.push(w);
-      acc += w;
+  const totalW = cols.reduce((s, c) => s + c.width, 0);
+  const colX: number[] = [];
+  const colW: number[] = [];
+  let acc = startX;
+  for (const c of cols) {
+    const w = (c.width / totalW) * usableWidth;
+    colX.push(acc);
+    colW.push(w);
+    acc += w;
+  }
+
+  const headerHeight = 20;
+  const rowHeight = 16;
+  let y = doc.y;
+
+  const drawHeader = () => {
+    doc.rect(startX, y, usableWidth, headerHeight).fill("#f0f0f0");
+    doc.font("Helvetica-Bold").fontSize(8).fillColor("#111");
+    cols.forEach((c, i) => {
+      doc.text(c.label, colX[i] + 3, y + 6, { width: colW[i] - 6, height: headerHeight, ellipsis: true, lineBreak: false });
+    });
+    doc.moveTo(startX, y + headerHeight).lineTo(startX + usableWidth, y + headerHeight).lineWidth(0.7).strokeColor("#999").stroke();
+    y += headerHeight;
+  };
+
+  drawHeader();
+
+  // The "No" source identifies lead-group boundaries.
+  const noCol = cols.find((c) => c.label === "No");
+  let prevRow: Record<string, string> | null = null;
+  let prevNo: string | null = null;
+
+  for (let r = 0; r < page.rows.length; r++) {
+    const row = page.rows[r];
+
+    if (y + rowHeight > doc.page.height - doc.page.margins.bottom) {
+      doc.addPage({ margin: 30, size: "A4", layout: "landscape" });
+      y = doc.page.margins.top;
+      drawHeader();
+      prevRow = null; // re-show grouped values at top of a continued page
+      prevNo = null;
     }
 
-    const headerHeight = 20;
-    const rowHeight = 16;
-    let y = doc.y;
+    const curNo = noCol ? row[noCol.source] ?? "" : String(r);
+    const isNewGroup = curNo !== prevNo;
 
-    const drawHeader = () => {
-      doc.rect(startX, y, usableWidth, headerHeight).fill("#f0f0f0");
-      doc.font("Helvetica-Bold").fontSize(8).fillColor("#111");
-      cols.forEach((c, i) => {
-        doc.text(c.label, colX[i] + 3, y + 6, { width: colW[i] - 6, height: headerHeight, ellipsis: true, lineBreak: false });
-      });
-      doc.moveTo(startX, y + headerHeight).lineTo(startX + usableWidth, y + headerHeight).lineWidth(0.7).strokeColor("#999").stroke();
-      y += headerHeight;
-    };
+    // Separator line between lead groups.
+    if (isNewGroup && r > 0 && y > doc.page.margins.top + headerHeight) {
+      doc.moveTo(startX, y).lineTo(startX + usableWidth, y).lineWidth(0.5).strokeColor("#ccc").stroke();
+    }
 
-    drawHeader();
+    doc.font("Helvetica").fontSize(8).fillColor("#111");
+    cols.forEach((c, i) => {
+      let value = row[c.source] ?? "";
 
-    // The "No" source identifies lead-group boundaries.
-    const noCol = cols.find((c) => c.label === "No");
-    let prevRow: Record<string, string> | null = null;
-    let prevNo: string | null = null;
-
-    for (let r = 0; r < page.rows.length; r++) {
-      const row = page.rows[r];
-
-      if (y + rowHeight > doc.page.height - doc.page.margins.bottom) {
-        doc.addPage({ margin: 30, size: "A4", layout: "landscape" });
-        y = doc.page.margins.top;
-        drawHeader();
-        prevRow = null; // re-show grouped values at top of a continued page
-        prevNo = null;
+      // Blank grouped columns (No, Channel) when they repeat the value in the
+      // row directly above AND we're still inside the same lead group. A new
+      // lead group always re-shows both No and Channel. This mirrors the
+      // dashboard's merged cells.
+      if (c.group && prevRow && !isNewGroup) {
+        const prevVal = prevRow[c.source] ?? "";
+        if (value === prevVal) value = "";
       }
 
-      const curNo = noCol ? row[noCol.source] ?? "" : String(r);
-      const isNewGroup = curNo !== prevNo;
-
-      // Separator line between lead groups.
-      if (isNewGroup && r > 0 && y > doc.page.margins.top + headerHeight) {
-        doc.moveTo(startX, y).lineTo(startX + usableWidth, y).lineWidth(0.5).strokeColor("#ccc").stroke();
-      }
-
-      doc.font("Helvetica").fontSize(8).fillColor("#111");
-      cols.forEach((c, i) => {
-        let value = row[c.source] ?? "";
-
-        // Blank grouped columns (No, Channel) when they repeat the value in the
-        // row directly above AND we're still inside the same lead group. A new
-        // lead group always re-shows both No and Channel. This mirrors the
-        // dashboard's merged cells.
-        if (c.group && prevRow && !isNewGroup) {
-          const prevVal = prevRow[c.source] ?? "";
-          if (value === prevVal) value = "";
-        }
-
-        doc.text(String(value).slice(0, 90), colX[i] + 3, y + 3, {
-          width: colW[i] - 6,
-          height: rowHeight,
-          ellipsis: true,
-          lineBreak: false
-        });
+      doc.text(String(value).slice(0, 90), colX[i] + 3, y + 3, {
+        width: colW[i] - 6,
+        height: rowHeight,
+        ellipsis: true,
+        lineBreak: false
       });
+    });
 
-      prevRow = row;
-      prevNo = curNo;
-      y += rowHeight;
-    }
+    prevRow = row;
+    prevNo = curNo;
+    y += rowHeight;
+  }
 
-    if (page.signature && page.signature.length > 0) {
-      drawSignatureBlock(doc, page.signature, startX, usableWidth, y);
-    }
-
-    doc.end();
-  });
+  if (page.signature && page.signature.length > 0) {
+    drawSignatureBlock(doc, page.signature, startX, usableWidth, y);
+  }
 }
 
 /**
@@ -259,6 +257,24 @@ function drawSignatureBlock(
   });
 }
 
+/**
+ * Renders every page-group into a single multi-page PDF (each group starts
+ * on its own fresh page), instead of one PDF file per group.
+ */
+function renderAllPages(pages: PageData[]): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const doc = new PDFDocument({ margin: 30, size: "A4", layout: "landscape" });
+    const chunks: Buffer[] = [];
+    doc.on("data", (c: Buffer) => chunks.push(c));
+    doc.on("end", () => resolve(Buffer.concat(chunks)));
+    doc.on("error", reject);
+
+    pages.forEach((page, i) => drawPageGroup(doc, page, i === 0));
+
+    doc.end();
+  });
+}
+
 export async function POST(req: NextRequest) {
   try {
     const body: ExportRequest = await req.json();
@@ -268,20 +284,13 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "No pages to export." }, { status: 400 });
     }
 
-    const buffers = await Promise.all(pages.map((p) => generatePDF(p)));
+    const pdfBuffer = await renderAllPages(pages);
 
-    const zip = new JSZip();
-    buffers.forEach((buf, i) => {
-      zip.file(`page_${pages[i].pageNumber}.pdf`, buf);
-    });
-
-    const zipBuffer = await zip.generateAsync({ type: "arraybuffer" });
-
-    return new Response(zipBuffer, {
+    return new Response(new Uint8Array(pdfBuffer), {
       status: 200,
       headers: {
-        "Content-Type": "application/zip",
-        "Content-Disposition": `attachment; filename="tableau-export-${Date.now()}.zip"`
+        "Content-Type": "application/pdf",
+        "Content-Disposition": `attachment; filename="tableau-export-${Date.now()}.pdf"`
       }
     });
   } catch (err: any) {
