@@ -29,25 +29,36 @@ export interface PageData {
 export interface ExportOptions {
   /**
    * How pages are determined:
-   *  - "field": group by an existing page column's value (pageField).
-   *  - "computeFromNo": there is no Page column in the view, so compute the
-   *    page number from the row number field (numberField) using the same
-   *    formula the dashboard uses:
-   *      Page = if No % 10 == 0 then int(No/5) else int(No/5)+1
+   *  - "field": group by an existing page column's value (pageField). This is
+   *    the preferred, portable option — it uses whatever formula the dashboard
+   *    itself computed (including any Page Size parameter), so it works on any
+   *    dashboard with no code changes. Requires the page calc to be present in
+   *    the worksheet's data (e.g. dropped onto the Marks "Detail" shelf).
+   *  - "computeFromNo": no Page column is available, so compute the page from
+   *    the row-number field using the standard pagination formula:
+   *      page = INT((No - 1) / pageSize) + 1
+   *    pageSize must match the dashboard's Page Size (parameter) for the pages
+   *    to line up.
    */
   mode: "field" | "computeFromNo";
   /** Column to group by when mode === "field" (e.g. "Page" or "AGG(Page)"). */
   pageField?: string;
   /** Column holding the row number when mode === "computeFromNo" (e.g. "AGG(No)"). */
   numberField?: string;
+  /** Rows per page when mode === "computeFromNo". Must match the dashboard. */
+  pageSize?: number;
   /** Base title for each PDF; the page number is appended. */
   titleBase: string;
   onProgress?: (message: string) => void;
 }
 
-/** Replicates the dashboard's Page calc exactly. */
-function computePage(no: number): number {
-  return no % 10 === 0 ? Math.trunc(no / 5) : Math.trunc(no / 5) + 1;
+/**
+ * Standard pagination formula: page = INT((No - 1) / pageSize) + 1.
+ * Matches the common Tableau calc `INT(([No]-1)/[Page Size])+1`.
+ */
+function computePage(no: number, pageSize: number): number {
+  const size = pageSize > 0 ? pageSize : 1;
+  return Math.trunc((no - 1) / size) + 1;
 }
 
 /** Parse a numeric value out of a formatted cell string like "1,234" or "12". */
@@ -67,6 +78,7 @@ export class ExportOrchestrator {
    */
   async buildPages(options: ExportOptions): Promise<{ pages: PageData[]; truncated: boolean }> {
     const { mode, pageField, numberField, titleBase, onProgress } = options;
+    const pageSize = options.pageSize && options.pageSize > 0 ? options.pageSize : 5;
 
     onProgress?.("Reading data...");
     const { columns, rows, truncated } = await this.client.getRows();
@@ -91,7 +103,7 @@ export class ExportOrchestrator {
     const keyForRow = (row: DataRow): string => {
       if (mode === "computeFromNo") {
         const no = parseNumber(row[sourceField]);
-        return no == null ? "" : String(computePage(no));
+        return no == null ? "" : String(computePage(no, pageSize));
       }
       return row[sourceField] ?? "";
     };
