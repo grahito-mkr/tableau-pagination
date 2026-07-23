@@ -5,11 +5,18 @@ import JSZip from "jszip";
 export const runtime = "nodejs";
 export const maxDuration = 300;
 
+interface SignatureEntry {
+  title: string;
+  role: string;
+  name: string;
+}
+
 interface PageData {
   pageNumber: string;
   title: string;
   columns: string[];
   rows: Array<Record<string, string>>;
+  signature?: SignatureEntry[];
 }
 
 interface ExportRequest {
@@ -204,7 +211,51 @@ function generatePDF(page: PageData): Promise<Buffer> {
       y += rowHeight;
     }
 
+    if (page.signature && page.signature.length > 0) {
+      drawSignatureBlock(doc, page.signature, startX, usableWidth, y);
+    }
+
     doc.end();
+  });
+}
+
+/**
+ * Draws the "Prepared by / Approved by / Approved by / Acknowledged by"
+ * sign-off block below the table: one evenly-spaced column per entry, a role
+ * caption, blank space for a physical signature, and the name in parentheses.
+ * Starts a new page if there isn't enough room left on the current one.
+ */
+function drawSignatureBlock(
+  doc: PDFKit.PDFDocument,
+  entries: SignatureEntry[],
+  startX: number,
+  usableWidth: number,
+  currentY: number
+): void {
+  const blockHeight = 110; // title + signing space + name
+  const topGap = 24;
+  let y = currentY + topGap;
+
+  if (y + blockHeight > doc.page.height - doc.page.margins.bottom) {
+    doc.addPage({ margin: 30, size: "A4", layout: "landscape" });
+    y = doc.page.margins.top + topGap;
+  } else {
+    doc.moveTo(startX, currentY + 10).lineTo(startX + usableWidth, currentY + 10).lineWidth(0.7).strokeColor("#999").stroke();
+  }
+
+  const colW = usableWidth / entries.length;
+
+  entries.forEach((e, i) => {
+    const cx = startX + i * colW;
+
+    doc.font("Helvetica").fontSize(10).fillColor("#111");
+    doc.text(e.title, cx, y, { width: colW, align: "center" });
+    doc.font("Helvetica-Bold").fontSize(10);
+    doc.text(e.role, cx, y + 14, { width: colW, align: "center" });
+
+    // Signing space, then the resolved name.
+    doc.font("Helvetica").fontSize(10);
+    doc.text(`( ${e.name} )`, cx, y + 70, { width: colW, align: "center" });
   });
 }
 
