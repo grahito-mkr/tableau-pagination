@@ -34,9 +34,11 @@ function cleanLabel(source: string): string {
  * they should appear in the PDF. `match` lists the possible cleaned inner
  * names (case-insensitive) that should map to this column — this covers the
  * literal field name plus the Measure Names/Measure Values aliases Tableau
- * uses when "Component" is really a pivoted measure column.
+ * uses when "Component" is really a pivoted measure column. `width` is an
+ * optional override for columns that need more room than their label length
+ * would suggest (e.g. formatted currency amounts).
  */
-const PREFERRED_COLUMNS: Array<{ label: string; match: string[] }> = [
+const PREFERRED_COLUMNS: Array<{ label: string; match: string[]; width?: number }> = [
   { label: "No", match: ["no"] },
   { label: "Employee ID", match: ["employee id"] },
   { label: "Employee Name", match: ["employee name"] },
@@ -44,9 +46,18 @@ const PREFERRED_COLUMNS: Array<{ label: string; match: string[] }> = [
   { label: "PTKP", match: ["ptkp"] },
   { label: "Employee Tax Status", match: ["employee tax status"] },
   { label: "Join Date", match: ["join date"] },
-  { label: "Component", match: ["component", "measure names"] },
-  { label: "Amount", match: ["amount", "measure values", "total_amount", "total amount"] }
+  { label: "Component", match: ["component", "measure names"], width: 16 },
+  { label: "Amount", match: ["amount", "measure values", "total_amount", "total amount"], width: 26 }
 ];
+
+/**
+ * Fields that are Tableau plumbing rather than real data — helper calcs kept
+ * on a worksheet's Marks card for filtering/logic (e.g. "tax_mode"), or the
+ * built-in Measure Names/Measure Values pseudo-fields when a literal column
+ * already stands in for them. These are never shown, even in the generic
+ * fallback for unrecognized dashboards below.
+ */
+const ALWAYS_HIDDEN = new Set(["measure names", "measure values", "tax_mode"]);
 
 function widthFor(label: string): number {
   const isNoCol = /^no$/i.test(label);
@@ -57,11 +68,14 @@ function widthFor(label: string): number {
 
 /**
  * Build PDF columns from whatever fields the selected worksheet actually
- * returned. Fields matching PREFERRED_COLUMNS are placed first, in that
- * order, using the pinned label. Any remaining returned field not covered by
- * PREFERRED_COLUMNS is appended afterward in its original order — so other
- * dashboards (with a different schema) still get every column rendered
- * instead of silently dropping anything.
+ * returned.
+ *  - If any field matches PREFERRED_COLUMNS, we treat this as a known
+ *    dashboard: only the pinned columns are shown, in that order, using the
+ *    pinned label/width. Any other field on the worksheet (helper calcs,
+ *    stray pseudo-fields, etc.) is left out on purpose.
+ *  - If nothing matches PREFERRED_COLUMNS at all, this is an unrecognized
+ *    dashboard: fall back to rendering every returned field generically (minus
+ *    the always-hidden plumbing fields) so nothing new silently disappears.
  * Every column is eligible for "grouping" (its cell is blanked when it
  * repeats the row directly above within the same row-number group), which
  * mimics Tableau's own merged-cell look for repeated dimension values.
@@ -76,13 +90,21 @@ function resolveColumns(available: string[]): ResolvedCol[] {
     );
     if (source) {
       used.add(source);
-      resolved.push({ label: pref.label, source, group: true, width: widthFor(pref.label) });
+      resolved.push({
+        label: pref.label,
+        source,
+        group: true,
+        width: pref.width ?? widthFor(pref.label)
+      });
     }
   }
 
+  if (resolved.length > 0) return resolved;
+
+  // Unrecognized dashboard: generic fallback over every returned field.
   for (const source of available) {
-    if (used.has(source)) continue;
     const label = cleanLabel(source);
+    if (ALWAYS_HIDDEN.has(label.toLowerCase())) continue;
     resolved.push({ label, source, group: true, width: widthFor(label) });
   }
 
