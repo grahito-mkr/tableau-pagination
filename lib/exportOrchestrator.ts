@@ -76,6 +76,20 @@ export class ExportOrchestrator {
       return a.localeCompare(b);
     });
 
+    // Sanity guard: the page field should have a small number of distinct
+    // values (one per visual page). If it produced hundreds/thousands, the
+    // wrong field was selected (e.g. a per-row id like "No"). Stop and explain
+    // instead of generating thousands of PDFs.
+    const MAX_PAGES = 200;
+    if (sortedKeys.length > MAX_PAGES) {
+      const sample = sortedKeys.slice(0, 8).join(", ");
+      throw new Error(
+        `Field "${pageField}" has ${sortedKeys.length} distinct values, which is too many to be page numbers ` +
+          `(sample: ${sample}...). Pick the field that holds the PAGE number ` +
+          `(often shown as "AGG(Page)"), not a per-row id like "No".`
+      );
+    }
+
     const pages: PageData[] = sortedKeys.map((key) => ({
       pageNumber: key,
       title: `${titleBase} - Page ${key}`,
