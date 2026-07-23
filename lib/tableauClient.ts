@@ -1,23 +1,34 @@
 /**
  * Tableau Extensions API client.
  *
- * Responsibilities:
- *  - initialize the extension and grab the first worksheet
- *  - read the full underlying data table and convert it into plain row objects
- *    keyed by column name, using each cell's formattedValue (the display string)
- *  - list available field/column names so the UI can offer a dropdown
- *
- * Deliberately does NOT mutate the user's date/channel filters. The only
- * filter it will touch is the pagination filter, and only via the
- * save/restore helpers below, so the dashboard is left exactly as it was.
+ * Key robustness choices (learned the hard way):
+ *  - A dashboard can contain several worksheet objects. worksheets[0] is not
+ *    guaranteed to be the leads table, so we expose ALL worksheet names and let
+ *    the UI/caller choose. We also auto-pick the sheet that actually returns
+ *    data.
+ *  - getSummaryDataAsync is deprecated and can return empty / fail on sheets
+ *    with many rows. We prefer getSummaryDataReaderAsync + getAllPagesAsync
+ *    (the supported path) and fall back to getSummaryDataAsync only if the
+ *    reader API isn't available (older Tableau).
+ *  - Summary data (not underlying) is required so calculated fields like
+ *    "No" and "Page" are present.
+ *  - We never mutate the user's filters.
  */
 
 export interface DataRow {
   [column: string]: string;
 }
 
+interface DataTableShape {
+  columns: Array<{ fieldName: string; index: number }>;
+  data: any[][];
+  totalRowCount?: number;
+  isTotalRowCountLimited?: boolean;
+}
+
 export class TableauClient {
   private dashboard: any;
+  private worksheets: any[] = [];
   private worksheet: any;
 
   constructor() {
@@ -30,70 +41,131 @@ export class TableauClient {
     const tableau = (window as any).tableau;
     await tableau.extensions.initializeAsync();
     this.dashboard = tableau.extensions.dashboardContent.dashboard;
-    this.worksheet = this.dashboard.worksheets[0];
-    if (!this.worksheet) {
+    this.worksheets = this.dashboard.worksheets || [];
+    if (this.worksheets.length === 0) {
       throw new Error("No worksheets found in this dashboard.");
     }
+    this.worksheet = this.worksheets[0];
   }
 
-  /** Human-readable worksheet name (for messages). */
+  /** Names of every worksheet in the dashboard (for a picker). */
+  getWorksheetNames(): string[] {
+    return this.worksheets.map((w) => w.name);
+  }
+
+  /** Explicitly choose which worksheet to read from, by name. */
+  selectWorksheet(name: string): void {
+    const match = this.worksheets.find((w) => w.name === name);
+    if (match) this.worksheet = match;
+  }
+
   get worksheetName(): string {
     return this.worksheet?.name ?? "";
   }
 
   /**
-   * Read the worksheet's summary data and return plain row objects keyed by
-   * column name. Each value is the cell's formattedValue (what the user sees).
-   *
-   * We use SUMMARY data (not underlying) because the worksheet's calculated
-   * fields — including "No" and "Page" — only exist in the summary/view data.
-   * Underlying data returns only the raw source columns and omits calcs.
-   * Summary data is also not capped at 10,000 rows.
+   * Read summary data from one worksheet, using the reader API when available.
+   * Returns the raw DataTable-shaped object, or null on failure/empty.
    */
-  async getRows(): Promise<{ columns: string[]; rows: DataRow[]; truncated: boolean }> {
-    if (!this.worksheet) throw new Error("No worksheet initialized");
+  private async readSummary(ws: any): Promise<DataTableShape | null> {
+    // Preferred path: reader API (not deprecated, handles large data).
+    if (typeof ws.getSummaryDataReaderAsync === "function") {
+      let reader: any;
+      try {
+        reader = await ws.getSummaryDataReaderAsync(undefined, { ignoreSelection: true });
+        const dataTable = await reader.getAllPagesAsync();
+        return dataTable;
+      } catch {
+        return null;
+      } finally {
+        if (reader?.releaseAsync) {
+          try {
+            await reader.releaseAsync();
+          } catch {
+            /* ignore */
+          }
+        }
+      }
+    }
 
-    const dataTable = await this.worksheet.getSummaryDataAsync({
-      maxRows: 0,
-      ignoreSelection: true
-    });
+    // Fallback: deprecated direct method (older Tableau).
+    try {
+      return await ws.getSummaryDataAsync({ maxRows: 0, ignoreSelection: true });
+    } catch {
+      return null;
+    }
+  }
 
-    const columns: Array<{ fieldName: string; index: number }> = dataTable.columns.map(
-      (c: any) => ({ fieldName: c.fieldName, index: c.index })
-    );
-
-    const rows: DataRow[] = dataTable.data.map((rawRow: any[]) => {
+  /** Convert a DataTable-shaped object into plain row objects keyed by column. */
+  private toRows(dataTable: DataTableShape): { columns: string[]; rows: DataRow[] } {
+    const columns = dataTable.columns.map((c) => ({ fieldName: c.fieldName, index: c.index }));
+    const rows: DataRow[] = dataTable.data.map((rawRow) => {
       const row: DataRow = {};
       for (const col of columns) {
         const cell = rawRow[col.index];
-        // formattedValue is the display string; fall back to value if absent.
-        const display =
+        row[col.fieldName] =
           cell?.formattedValue ??
           (cell?.value !== undefined && cell?.value !== null ? String(cell.value) : "");
-        row[col.fieldName] = display;
       }
       return row;
     });
+    return { columns: columns.map((c) => c.fieldName), rows };
+  }
 
+  /**
+   * Read rows from the currently-selected worksheet. If it comes back empty,
+   * fall back to scanning every worksheet and using the first one that returns
+   * data — this handles the case where worksheets[0] isn't the leads table.
+   */
+  async getRows(): Promise<{ columns: string[]; rows: DataRow[]; truncated: boolean; sheet: string }> {
+    if (!this.worksheet) throw new Error("No worksheet initialized");
+
+    // Try the selected sheet first.
+    let dataTable = await this.readSummary(this.worksheet);
+    let usedSheet = this.worksheet;
+
+    // If empty, scan the others for one that has data.
+    if (!dataTable || dataTable.data.length === 0) {
+      for (const ws of this.worksheets) {
+        if (ws === this.worksheet) continue;
+        const dt = await this.readSummary(ws);
+        if (dt && dt.data.length > 0) {
+          dataTable = dt;
+          usedSheet = ws;
+          break;
+        }
+      }
+    }
+
+    if (!dataTable || dataTable.data.length === 0) {
+      throw new Error(
+        "No rows were returned from any worksheet. Check that the dashboard has data for the current filters, and that the extension has 'full data' permission."
+      );
+    }
+
+    const { columns, rows } = this.toRows(dataTable);
     return {
-      columns: columns.map((c) => c.fieldName),
+      columns,
       rows,
-      truncated: Boolean(dataTable.isTotalRowCountLimited)
+      truncated: Boolean(dataTable.isTotalRowCountLimited),
+      sheet: usedSheet.name
     };
   }
 
   /**
-   * List the field names on the worksheet, so the UI can show a dropdown
-   * instead of the user typing a guess. Uses summary data so calculated fields
-   * (No, Page, etc.) are included.
+   * Field names on the worksheet that actually has data (summary data, so
+   * calculated fields like No/Page are included).
    */
   async getFieldNames(): Promise<string[]> {
-    if (!this.worksheet) return [];
-    const dataTable = await this.worksheet.getSummaryDataAsync({ maxRows: 1, ignoreSelection: true });
-    return dataTable.columns.map((c: any) => c.fieldName);
+    // Reuse getRows' sheet-scan so the dropdown reflects the sheet we'll export.
+    try {
+      const { columns } = await this.getRows();
+      return columns;
+    } catch {
+      return [];
+    }
   }
 
-  /** Persist small bits of config in the extension's settings store. */
   saveState(key: string, state: unknown): void {
     const tableau = (window as any).tableau;
     if (!tableau) return;
