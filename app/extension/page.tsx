@@ -3,54 +3,36 @@
 import { useEffect, useRef, useState } from "react";
 import { TableauClient } from "@/lib/tableauClient";
 import { ExportOrchestrator, type ExportOptions } from "@/lib/exportOrchestrator";
+import { DASHBOARD_CONFIGS, type DashboardConfig } from "@/lib/dashboardConfigs";
 
 type Status = "idle" | "working" | "done" | "error";
-type Mode = "computeFromNo" | "field";
+
+/** Inner name inside an aggregation wrapper, e.g. "AGG(No)" -> "no". */
+function innerName(n: string): string {
+  const m = n.match(/\(([^)]+)\)\s*$/);
+  return (m ? m[1] : n).trim().toLowerCase();
+}
+
+/** Find a field whose inner name equals target exactly (case-insensitive). */
+function findInner(names: string[], target: string): string | undefined {
+  return names.find((n) => innerName(n) === target.toLowerCase());
+}
 
 export default function ExportPage() {
   const [ready, setReady] = useState(false);
   const [initError, setInitError] = useState<string | null>(null);
-  const [fields, setFields] = useState<string[]>([]);
-  const [worksheets, setWorksheets] = useState<string[]>([]);
-  const [worksheet, setWorksheet] = useState("");
-  const [mode, setMode] = useState<Mode>("field");
+  const [dashboardId, setDashboardId] = useState("");
+  const [worksheetNames, setWorksheetNames] = useState<string[]>([]);
+  const [config, setConfig] = useState<DashboardConfig | null>(null);
   const [numberField, setNumberField] = useState("");
-  const [pageField, setPageField] = useState("");
-  const [pageSize, setPageSize] = useState(5);
-  const [titleBase, setTitleBase] = useState("Report");
+  const [configError, setConfigError] = useState<string | null>(null);
   const [status, setStatus] = useState<Status>("idle");
   const [message, setMessage] = useState("");
   const [error, setError] = useState<string | null>(null);
 
-  // Single long-lived client so a worksheet choice made in the picker is
-  // still in effect when Export is clicked.
+  // Single long-lived client so everything set up during init is still in
+  // effect when Export is clicked.
   const clientRef = useRef<TableauClient | null>(null);
-
-  /** Re-read field names for whichever worksheet is currently selected, and
-   * re-run the auto-detection of page/row-number fields against it. */
-  async function refreshFieldsForCurrentWorksheet(client: TableauClient) {
-    const names = await client.getFieldNames();
-    setFields(names);
-    setWorksheet(client.worksheetName);
-
-    const pageMatch = findPageField(names);
-    const noMatch = findInner(names, "no");
-
-    if (pageMatch) {
-      setMode("field");
-      setPageField(pageMatch);
-    } else if (noMatch) {
-      setMode("computeFromNo");
-      setNumberField(noMatch);
-    } else if (names.length > 0) {
-      setMode("field");
-      setPageField(names[0]);
-      setNumberField(names[0]);
-    } else {
-      setPageField("");
-      setNumberField("");
-    }
-  }
 
   function initTableau() {
     if (!(window as any).tableau) return;
@@ -60,49 +42,32 @@ export default function ExportPage() {
       .initialize()
       .then(async () => {
         setReady(true);
-        setWorksheets(client.getWorksheetNames());
+
+        const id = client.dashboardId;
+        setDashboardId(id);
+        setWorksheetNames(client.getWorksheetNames());
+
+        const cfg = DASHBOARD_CONFIGS[id];
+        setConfig(cfg ?? null);
+        if (!cfg) return;
+
+        client.selectWorksheet(cfg.worksheetName);
         try {
-          await refreshFieldsForCurrentWorksheet(client);
-        } catch {
-          /* best effort */
+          const names = await client.getFieldNames();
+          const match = findInner(names, cfg.numberFieldMatch ?? "no");
+          if (!match) {
+            setConfigError(
+              `Configured worksheet "${cfg.worksheetName}" has no field matching ` +
+                `"${cfg.numberFieldMatch ?? "no"}". Available fields: ${names.join(", ") || "(none)"}.`
+            );
+            return;
+          }
+          setNumberField(match);
+        } catch (err: any) {
+          setConfigError(err?.message || "Could not read fields from the configured worksheet.");
         }
       })
       .catch((err: any) => setInitError(err?.message || String(err)));
-  }
-
-  async function handleWorksheetChange(name: string) {
-    const client = clientRef.current;
-    if (!client) return;
-    client.selectWorksheet(name);
-    setWorksheet(name);
-    try {
-      await refreshFieldsForCurrentWorksheet(client);
-    } catch {
-      /* best effort */
-    }
-  }
-
-  /** Inner name inside an aggregation wrapper, e.g. "AGG(Page)" -> "page". */
-  function innerName(n: string): string {
-    const m = n.match(/\(([^)]+)\)\s*$/);
-    return (m ? m[1] : n).trim().toLowerCase();
-  }
-
-  /** Find a field whose inner name equals target exactly. */
-  function findInner(names: string[], target: string): string | undefined {
-    return names.find((n) => innerName(n) === target);
-  }
-
-  /**
-   * Find the best "page" field. Matches "page" or "page number" (but not
-   * "page size"), tolerating the AGG(...) wrapper.
-   */
-  function findPageField(names: string[]): string | undefined {
-    const isPage = (n: string) => {
-      const inner = innerName(n);
-      return inner === "page" || inner === "page number" || inner === "pagenumber";
-    };
-    return names.find(isPage);
   }
 
   useEffect(() => {
@@ -131,7 +96,7 @@ export default function ExportPage() {
   }, []);
 
   async function handleExport() {
-    if (!ready || status === "working") return;
+    if (!ready || status === "working" || !config || !numberField) return;
     setStatus("working");
     setError(null);
     setMessage("Starting...");
@@ -143,15 +108,16 @@ export default function ExportPage() {
         await client.initialize();
         clientRef.current = client;
       }
-      if (worksheet) client.selectWorksheet(worksheet);
+      client.selectWorksheet(config.worksheetName);
+
       const orchestrator = new ExportOrchestrator(client);
 
       const opts: ExportOptions = {
-        mode,
-        titleBase,
-        pageField: mode === "field" ? pageField : undefined,
-        numberField: mode === "computeFromNo" ? numberField : undefined,
-        pageSize: mode === "computeFromNo" ? pageSize : undefined,
+        mode: "computeFromNo",
+        titleBase: config.titleBase,
+        headerLines: config.headerLines ? [...config.headerLines] : undefined,
+        numberField,
+        pageSize: config.pageSize,
         onProgress: (m) => setMessage(m)
       };
 
@@ -175,21 +141,11 @@ export default function ExportPage() {
   }
 
   const busy = status === "working";
-  const inputStyle = {
-    width: "100%",
-    padding: 8,
-    borderRadius: 6,
-    border: "1px solid #ccc",
-    boxSizing: "border-box" as const,
-    marginBottom: 4
-  };
 
   return (
-    <div style={{ padding: 32, maxWidth: 560, margin: "0 auto", fontSize: 14 }}>
-      <h1 style={{ fontSize: 22 }}>Tableau Pagination</h1>
-
+    <div style={{ padding: 32, maxWidth: 420, margin: "0 auto", fontSize: 14, textAlign: "center" }}>
       {initError && (
-        <div style={{ background: "#fee", border: "1px solid #fcc", borderRadius: 6, padding: 12, marginBottom: 16 }}>
+        <div style={{ background: "#fee", border: "1px solid #fcc", borderRadius: 6, padding: 12, marginBottom: 16, textAlign: "left" }}>
           <strong style={{ color: "crimson" }}>Initialization Error:</strong>
           <pre style={{ marginTop: 6, fontSize: 12, whiteSpace: "pre-wrap", color: "#555" }}>{initError}</pre>
         </div>
@@ -197,107 +153,36 @@ export default function ExportPage() {
 
       {!ready && !initError && <div style={{ color: "#666" }}>Connecting to Tableau...</div>}
 
-      {ready && (
-        <>
-          <div
-            style={{
-              background: "#f0f7ff",
-              border: "1px solid #cfe0ff",
-              borderRadius: 6,
-              padding: 12,
-              marginBottom: 20,
-              fontSize: 13,
-              color: "#234"
-            }}
-          >
-            Before exporting, set the dashboard's <strong>Page</strong> control to <strong>(All)</strong> so
-            every page's rows are included. Your date and channel filters are left untouched.
-          </div>
-
-          <label style={{ display: "block", fontWeight: 600, marginBottom: 4 }}>Worksheet</label>
-          <select
-            value={worksheet}
-            onChange={(e) => handleWorksheetChange(e.target.value)}
-            style={inputStyle}
-          >
-            {worksheets.length === 0 && <option value="">No worksheets found</option>}
-            {worksheets.map((w) => (
-              <option key={w} value={w}>
-                {w}
-              </option>
+      {ready && !config && (
+        <div style={{ background: "#fee", border: "1px solid #fcc", borderRadius: 6, padding: 16, textAlign: "left", fontSize: 13 }}>
+          <strong style={{ color: "crimson" }}>This dashboard isn't configured yet.</strong>
+          <p style={{ marginTop: 8, marginBottom: 4 }}>
+            Add an entry to <code>lib/dashboardConfigs.ts</code> using this dashboard ID as the key:
+          </p>
+          <pre style={{ background: "#fff", padding: 8, borderRadius: 4, overflowX: "auto", border: "1px solid #eee" }}>
+            {dashboardId || "(empty — check console)"}
+          </pre>
+          <p style={{ marginTop: 8, marginBottom: 4 }}>Worksheets on this dashboard:</p>
+          <ul style={{ margin: 0, paddingLeft: 18 }}>
+            {worksheetNames.map((w) => (
+              <li key={w}>
+                <code>{w}</code>
+              </li>
             ))}
-          </select>
-          <div style={{ fontSize: 12, color: "#666", marginBottom: 16 }}>
-            The worksheet the extension reads columns from. Pick the one that has{" "}
-            <strong>every column you want in the PDF</strong> on its Marks card (Rows/Columns/Detail) —
-            not just the page or row-number field. If a field you expect is missing below, this is usually
-            the wrong worksheet.
-          </div>
+          </ul>
+        </div>
+      )}
 
-          <label style={{ display: "block", fontWeight: 600, marginBottom: 4 }}>How are pages defined?</label>
-          <select value={mode} onChange={(e) => setMode(e.target.value as Mode)} style={inputStyle}>
-            <option value="field">Use an existing Page column (recommended)</option>
-            <option value="computeFromNo">Compute from row number (No)</option>
-          </select>
-          <div style={{ fontSize: 12, color: "#666", marginBottom: 16 }}>
-            Recommended: expose the dashboard's own page calc on the worksheet (drag it onto Marks →
-            Detail) and select it here — it works on any dashboard regardless of its page formula. Only
-            use "Compute from row number" if no page field is available.
-          </div>
+      {ready && config && configError && (
+        <div style={{ background: "#fee", border: "1px solid #fcc", borderRadius: 6, padding: 12, marginBottom: 16, textAlign: "left", color: "crimson", fontSize: 13 }}>
+          {configError}
+        </div>
+      )}
 
-          {mode === "computeFromNo" ? (
-            <>
-              <label style={{ display: "block", fontWeight: 600, marginBottom: 4 }}>Row Number Field</label>
-              <select value={numberField} onChange={(e) => setNumberField(e.target.value)} style={inputStyle}>
-                {fields.length === 0 && <option value="">No fields found</option>}
-                {fields.map((f) => (
-                  <option key={f} value={f}>
-                    {f}
-                  </option>
-                ))}
-              </select>
-              <div style={{ fontSize: 12, color: "#666", marginBottom: 16 }}>
-                The field with the row number (usually <code>AGG(No)</code>).
-              </div>
-
-              <label style={{ display: "block", fontWeight: 600, marginBottom: 4 }}>Page Size</label>
-              <input
-                type="number"
-                min={1}
-                value={pageSize}
-                onChange={(e) => setPageSize(Math.max(1, parseInt(e.target.value || "1", 10)))}
-                style={inputStyle}
-              />
-              <div style={{ fontSize: 12, color: "#666", marginBottom: 16 }}>
-                Rows per page — must match the dashboard's Page Size. Page = <code>INT((No − 1) / Page Size) + 1</code>.
-              </div>
-            </>
-          ) : (
-            <>
-              <label style={{ display: "block", fontWeight: 600, marginBottom: 4 }}>Page Field</label>
-              <select value={pageField} onChange={(e) => setPageField(e.target.value)} style={inputStyle}>
-                {fields.length === 0 && <option value="">No fields found</option>}
-                {fields.map((f) => (
-                  <option key={f} value={f}>
-                    {f}
-                  </option>
-                ))}
-              </select>
-              <div style={{ fontSize: 12, color: "#666", marginBottom: 16 }}>
-                The field that holds the page number (one PDF per distinct value). Uses the dashboard's own
-                formula, so it adapts automatically if the Page Size parameter changes.
-              </div>
-            </>
-          )}
-
-          <label style={{ display: "block", fontWeight: 600, marginBottom: 4 }}>PDF Title</label>
-          <input value={titleBase} onChange={(e) => setTitleBase(e.target.value)} style={inputStyle} />
-          <div style={{ fontSize: 12, color: "#666", marginBottom: 20 }}>
-            Base title for each PDF (the page number is appended).
-          </div>
-
+      {ready && config && !configError && (
+        <>
           {error && (
-            <div style={{ background: "#fee", border: "1px solid #fcc", borderRadius: 6, padding: 12, marginBottom: 16, color: "crimson" }}>
+            <div style={{ background: "#fee", border: "1px solid #fcc", borderRadius: 6, padding: 12, marginBottom: 16, color: "crimson", textAlign: "left" }}>
               {error}
             </div>
           )}
@@ -314,8 +199,8 @@ export default function ExportPage() {
             disabled={busy}
             style={{
               width: "100%",
-              padding: 12,
-              fontSize: 15,
+              padding: 16,
+              fontSize: 16,
               fontWeight: 700,
               color: "#fff",
               background: busy ? "#9bb8e8" : "#2563eb",
@@ -324,7 +209,7 @@ export default function ExportPage() {
               cursor: busy ? "not-allowed" : "pointer"
             }}
           >
-            {busy ? "Exporting..." : "Export All Pages as PDF"}
+            {busy ? "Exporting..." : "Export"}
           </button>
         </>
       )}
