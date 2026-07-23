@@ -19,11 +19,33 @@
 
 import { TableauClient, type DataRow } from "./tableauClient";
 
+/** One column of the signature block, e.g. "Prepared by / Admin & Payroll / (Name)". */
+export interface SignatureEntry {
+  title: string; // e.g. "Prepared by"
+  role: string; // e.g. "Admin & Payroll" — also the Tableau Parameter name to read
+  name: string; // resolved current value of that parameter
+}
+
+/**
+ * The dashboard's sign-off block is driven by four Tableau Parameters (visible
+ * as dropdowns on the dashboard), not by worksheet row data. `role` doubles as
+ * the exact Parameter name to look up.
+ */
+const SIGNATURE_SPEC: Array<{ title: string; role: string }> = [
+  { title: "Prepared by", role: "Admin & Payroll" },
+  { title: "Approved by", role: "DOF" },
+  { title: "Approved by", role: "DOHR" },
+  { title: "Acknowledged by", role: "GM" }
+];
+
 export interface PageData {
   pageNumber: string;
   title: string;
   columns: string[];
   rows: DataRow[];
+  /** Present only on the last page of the whole export; rendered as a
+   * sign-off block after the table on that page's final PDF page. */
+  signature?: SignatureEntry[];
 }
 
 export interface ExportOptions {
@@ -152,6 +174,18 @@ export class ExportOrchestrator {
       columns,
       rows: groups.get(key)!
     }));
+
+    // Signature block: read the four sign-off Parameters (best effort — if
+    // they're missing on this dashboard, the block is simply omitted rather
+    // than failing the export) and attach to the last page only.
+    onProgress?.("Reading signature block...");
+    const paramValues = await this.client.getParameterValues(SIGNATURE_SPEC.map((s) => s.role));
+    const signature: SignatureEntry[] = SIGNATURE_SPEC.filter((s) => paramValues[s.role] != null).map(
+      (s) => ({ title: s.title, role: s.role, name: paramValues[s.role] })
+    );
+    if (signature.length > 0 && pages.length > 0) {
+      pages[pages.length - 1].signature = signature;
+    }
 
     return { pages, truncated };
   }
