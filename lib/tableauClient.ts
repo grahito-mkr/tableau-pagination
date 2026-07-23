@@ -42,15 +42,18 @@ export class TableauClient {
   }
 
   /**
-   * Read the full underlying data table and return plain row objects keyed by
+   * Read the worksheet's summary data and return plain row objects keyed by
    * column name. Each value is the cell's formattedValue (what the user sees).
    *
-   * maxRows: 0 asks Tableau for all rows (capped by Tableau at 10,000).
+   * We use SUMMARY data (not underlying) because the worksheet's calculated
+   * fields — including "No" and "Page" — only exist in the summary/view data.
+   * Underlying data returns only the raw source columns and omits calcs.
+   * Summary data is also not capped at 10,000 rows.
    */
   async getRows(): Promise<{ columns: string[]; rows: DataRow[]; truncated: boolean }> {
     if (!this.worksheet) throw new Error("No worksheet initialized");
 
-    const dataTable = await this.worksheet.getUnderlyingDataAsync({
+    const dataTable = await this.worksheet.getSummaryDataAsync({
       maxRows: 0,
       ignoreSelection: true
     });
@@ -80,12 +83,13 @@ export class TableauClient {
   }
 
   /**
-   * List the field names available in the underlying data, so the UI can show a
-   * dropdown instead of the user typing a guess.
+   * List the field names on the worksheet, so the UI can show a dropdown
+   * instead of the user typing a guess. Uses summary data so calculated fields
+   * (No, Page, etc.) are included.
    */
   async getFieldNames(): Promise<string[]> {
     if (!this.worksheet) return [];
-    const dataTable = await this.worksheet.getUnderlyingDataAsync({ maxRows: 1, ignoreSelection: true });
+    const dataTable = await this.worksheet.getSummaryDataAsync({ maxRows: 1, ignoreSelection: true });
     return dataTable.columns.map((c: any) => c.fieldName);
   }
 
