@@ -18,6 +18,7 @@
  */
 
 import { TableauClient, type DataRow } from "./tableauClient";
+import type { ColumnSpec } from "./dashboardConfigs";
 
 /** One column of the signature block, e.g. "Prepared by / Admin & Payroll / (Name)". */
 export interface SignatureEntry {
@@ -92,6 +93,9 @@ export interface ExportOptions {
    * top of every page, above the "Period X to Y" line (auto-fetched from the
    * Start Date/End Date parameters). Leave empty/omit to show no letterhead. */
   headerLines?: string[];
+  /** PDF column layout (which columns, order, labels, widths) passed straight
+   * through to the API route. Omit to render every returned field generically. */
+  columnLayout?: ColumnSpec[];
   onProgress?: (message: string) => void;
 }
 
@@ -238,7 +242,7 @@ export class ExportOrchestrator {
     const response = await fetch("/api/export-pdfs", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ pages })
+      body: JSON.stringify({ pages, layout: options.columnLayout })
     });
 
     if (!response.ok) {
