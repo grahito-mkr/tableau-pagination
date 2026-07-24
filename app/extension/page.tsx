@@ -43,11 +43,18 @@ export default function ExportPage() {
       .then(async () => {
         setReady(true);
 
-        const id = client.dashboardId;
+        const id = client.dashboardName;
         setDashboardId(id);
         setWorksheetNames(client.getWorksheetNames());
 
-        const cfg = DASHBOARD_CONFIGS[id];
+        // Resolve config by dashboard name. If it doesn't match but exactly
+        // one config is defined (the common single-report deployment), just
+        // use it — the end user only ever clicks Export.
+        let cfg = DASHBOARD_CONFIGS[id];
+        if (!cfg) {
+          const all = Object.values(DASHBOARD_CONFIGS);
+          if (all.length === 1) cfg = all[0];
+        }
         setConfig(cfg ?? null);
         if (!cfg) return;
 
@@ -157,7 +164,7 @@ export default function ExportPage() {
         <div style={{ background: "#fee", border: "1px solid #fcc", borderRadius: 6, padding: 16, textAlign: "left", fontSize: 13 }}>
           <strong style={{ color: "crimson" }}>This dashboard isn't configured yet.</strong>
           <p style={{ marginTop: 8, marginBottom: 4 }}>
-            Add an entry to <code>lib/dashboardConfigs.ts</code> using this dashboard ID as the key:
+            Add an entry to <code>lib/dashboardConfigs.ts</code> using this dashboard name as the key:
           </p>
           <pre style={{ background: "#fff", padding: 8, borderRadius: 4, overflowX: "auto", border: "1px solid #eee" }}>
             {dashboardId || "(empty — check console)"}
