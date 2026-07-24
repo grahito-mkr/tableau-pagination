@@ -75,6 +75,25 @@ export const DASHBOARD_CONFIGS: Record<string, DashboardConfig> = {
       { label: "Component", match: ["component", "measure names"], width: 16 },
       { label: "Amount", match: ["amount", "measure values", "total_amount", "total amount"], width: 20 }
     ]
+  },
+
+  // Custom Report - BPR Daya Perdana — Leads with Details.
+  "Custom Report - BPR Daya Perdana": {
+    worksheetName: "Leads with Details",
+    pageSize: 1,
+    titleBase: "Leads Report",
+    numberFieldMatch: "no",
+    headerLines: ["BPR DAYA PERDANA", "CUSTOM REPORT - LEADS WITH DETAILS"],
+    columns: [
+      { label: "No", match: ["no"] },
+      { label: "Channel", match: ["channel"] },
+      { label: "Omni Channel Contact Link", match: ["omni channel contact link"], width: 45 },
+      { label: "CRM Contact Link", match: ["crm contact link"], width: 30 },
+      { label: "Contact Name", match: ["contact name"], width: 18 },
+      { label: "Nomer Telp/User ID", match: ["nomer telp/user id"], width: 16 },
+      { label: "Link Room ID", match: ["link room id"], width: 50 },
+      { label: "Tagging Omni Channel", match: ["tagging omni channel"] }
+    ]
   }
 
   // Add additional dashboards here, e.g.:
