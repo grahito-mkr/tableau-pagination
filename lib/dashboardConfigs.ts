@@ -80,7 +80,7 @@ export const DASHBOARD_CONFIGS: Record<string, DashboardConfig> = {
   // Custom Report - BPR Daya Perdana — Leads with Details.
   "Custom Report - BPR Daya Perdana": {
     worksheetName: "Leads with Details",
-    pageSize: 1,
+    pageSize: 5,
     titleBase: "Leads Report",
     numberFieldMatch: "no",
     headerLines: ["BPR DAYA PERDANA", "CUSTOM REPORT - LEADS WITH DETAILS"],
