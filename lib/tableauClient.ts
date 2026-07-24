@@ -64,13 +64,17 @@ export class TableauClient {
   }
 
   /**
-   * Stable identifier of the dashboard this extension is running on, used to
-   * look up a per-dashboard config so end users never configure anything —
-   * they just click Export. Note: the Tableau Extensions API's Dashboard
-   * object does not expose a numeric/GUID "id" property; the reliably
-   * present, stable value is its name (the dashboard's tab name in Tableau).
+   * Name of the dashboard this extension is running on, used to look up a
+   * per-dashboard config (worksheet name, page size, title, letterhead...)
+   * so end users never have to configure anything themselves — they just
+   * click Export.
+   *
+   * The Extensions API dashboard object exposes `name` but NOT a GUID/`id`
+   * (Dashboard extends Sheet: only name/sheetType/size), so config is keyed
+   * by dashboard name. For single-report deployments the UI also falls back
+   * to the sole config entry, so this doesn't even need to match.
    */
-  get dashboardId(): string {
+  get dashboardName(): string {
     return String(this.dashboard?.name ?? "");
   }
 
