@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import PDFDocument from "pdfkit";
+import type { ColumnSpec } from "@/lib/dashboardConfigs";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -26,6 +27,10 @@ interface PageData {
 
 interface ExportRequest {
   pages: PageData[];
+  /** Optional PDF column layout from the dashboard's config. When present it
+   * decides which columns show, their order, labels and widths. When absent,
+   * every returned field is rendered generically. */
+  layout?: ColumnSpec[];
 }
 
 interface ResolvedCol {
@@ -42,32 +47,11 @@ function cleanLabel(source: string): string {
 }
 
 /**
- * Preferred column order/labels for the Salary report. Listed in the order
- * they should appear in the PDF. `match` lists the possible cleaned inner
- * names (case-insensitive) that should map to this column — this covers the
- * literal field name plus the Measure Names/Measure Values aliases Tableau
- * uses when "Component" is really a pivoted measure column. `width` is an
- * optional override for columns that need more room than their label length
- * would suggest (e.g. formatted currency amounts).
- */
-const PREFERRED_COLUMNS: Array<{ label: string; match: string[]; width?: number }> = [
-  { label: "No", match: ["no"] },
-  { label: "Employee ID", match: ["employee id"] },
-  { label: "Employee Name", match: ["employee name"], width: 20 },
-  { label: "Organization", match: ["organization"], width: 20 },
-  { label: "PTKP", match: ["ptkp"] },
-  { label: "Employee Tax Status", match: ["employee tax status"] },
-  { label: "Join Date", match: ["join date"] },
-  { label: "Component", match: ["component", "measure names"], width: 16 },
-  { label: "Amount", match: ["amount", "measure values", "total_amount", "total amount"], width: 20 }
-];
-
-/**
  * Fields that are Tableau plumbing rather than real data — helper calcs kept
  * on a worksheet's Marks card for filtering/logic (e.g. "tax_mode"), or the
  * built-in Measure Names/Measure Values pseudo-fields when a literal column
- * already stands in for them. These are never shown, even in the generic
- * fallback for unrecognized dashboards below.
+ * already stands in for them. These are never shown in the generic fallback
+ * for dashboards that don't declare a column layout in their config.
  */
 const ALWAYS_HIDDEN = new Set(["measure names", "measure values", "tax_mode"]);
 
@@ -81,39 +65,40 @@ function widthFor(label: string): number {
 /**
  * Build PDF columns from whatever fields the selected worksheet actually
  * returned.
- *  - If any field matches PREFERRED_COLUMNS, we treat this as a known
- *    dashboard: only the pinned columns are shown, in that order, using the
- *    pinned label/width. Any other field on the worksheet (helper calcs,
- *    stray pseudo-fields, etc.) is left out on purpose.
- *  - If nothing matches PREFERRED_COLUMNS at all, this is an unrecognized
- *    dashboard: fall back to rendering every returned field generically (minus
- *    the always-hidden plumbing fields) so nothing new silently disappears.
+ *  - If the dashboard's config provides a `layout`, only those columns are
+ *    shown, in that order, with the configured label/width. Any other field
+ *    on the worksheet (helper calcs, stray pseudo-fields, etc.) is left out.
+ *  - If no layout is provided (or none of its columns match), fall back to
+ *    rendering every returned field generically (minus the always-hidden
+ *    plumbing fields), so a new dashboard works with zero route changes.
  * Every column is eligible for "grouping" (its cell is blanked when it
  * repeats the row directly above within the same row-number group), which
  * mimics Tableau's own merged-cell look for repeated dimension values.
  */
-function resolveColumns(available: string[]): ResolvedCol[] {
+function resolveColumns(available: string[], layout?: ColumnSpec[]): ResolvedCol[] {
   const used = new Set<string>();
   const resolved: ResolvedCol[] = [];
 
-  for (const pref of PREFERRED_COLUMNS) {
-    const source = available.find(
-      (a) => !used.has(a) && pref.match.includes(cleanLabel(a).toLowerCase())
-    );
-    if (source) {
-      used.add(source);
-      resolved.push({
-        label: pref.label,
-        source,
-        group: true,
-        width: pref.width ?? widthFor(pref.label)
-      });
+  if (layout && layout.length > 0) {
+    for (const pref of layout) {
+      const matches = pref.match.map((m) => m.toLowerCase());
+      const source = available.find(
+        (a) => !used.has(a) && matches.includes(cleanLabel(a).toLowerCase())
+      );
+      if (source) {
+        used.add(source);
+        resolved.push({
+          label: pref.label,
+          source,
+          group: true,
+          width: pref.width ?? widthFor(pref.label)
+        });
+      }
     }
+    if (resolved.length > 0) return resolved;
   }
 
-  if (resolved.length > 0) return resolved;
-
-  // Unrecognized dashboard: generic fallback over every returned field.
+  // No layout, or nothing matched: generic fallback over every returned field.
   for (const source of available) {
     const label = cleanLabel(source);
     if (ALWAYS_HIDDEN.has(label.toLowerCase())) continue;
@@ -128,12 +113,12 @@ function resolveColumns(available: string[]): ResolvedCol[] {
  * block) onto a shared PDFDocument, starting a fresh physical page first
  * unless this is the very first group in the document.
  */
-function drawPageGroup(doc: PDFKit.PDFDocument, page: PageData, isFirstGroup: boolean): void {
+function drawPageGroup(doc: PDFKit.PDFDocument, page: PageData, isFirstGroup: boolean, layout?: ColumnSpec[]): void {
   if (!isFirstGroup) {
     doc.addPage({ margin: 30, size: "A4", layout: "landscape" });
   }
 
-  const cols = resolveColumns(page.columns);
+  const cols = resolveColumns(page.columns, layout);
 
   const pageStartX = doc.page.margins.left;
   const pageUsableWidth = doc.page.width - doc.page.margins.left - doc.page.margins.right;
@@ -289,7 +274,7 @@ function drawSignatureBlock(
  * Renders every page-group into a single multi-page PDF (each group starts
  * on its own fresh page), instead of one PDF file per group.
  */
-function renderAllPages(pages: PageData[]): Promise<Buffer> {
+function renderAllPages(pages: PageData[], layout?: ColumnSpec[]): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const doc = new PDFDocument({ margin: 30, size: "A4", layout: "landscape" });
     const chunks: Buffer[] = [];
@@ -297,7 +282,7 @@ function renderAllPages(pages: PageData[]): Promise<Buffer> {
     doc.on("end", () => resolve(Buffer.concat(chunks)));
     doc.on("error", reject);
 
-    pages.forEach((page, i) => drawPageGroup(doc, page, i === 0));
+    pages.forEach((page, i) => drawPageGroup(doc, page, i === 0, layout));
 
     doc.end();
   });
@@ -306,13 +291,13 @@ function renderAllPages(pages: PageData[]): Promise<Buffer> {
 export async function POST(req: NextRequest) {
   try {
     const body: ExportRequest = await req.json();
-    const { pages } = body;
+    const { pages, layout } = body;
 
     if (!Array.isArray(pages) || pages.length === 0) {
       return NextResponse.json({ error: "No pages to export." }, { status: 400 });
     }
 
-    const pdfBuffer = await renderAllPages(pages);
+    const pdfBuffer = await renderAllPages(pages, layout);
 
     return new Response(new Uint8Array(pdfBuffer), {
       status: 200,
