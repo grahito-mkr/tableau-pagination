@@ -24,7 +24,7 @@ export default function ExportPage() {
   const [dashboardId, setDashboardId] = useState("");
   const [worksheetNames, setWorksheetNames] = useState<string[]>([]);
   const [config, setConfig] = useState<DashboardConfig | null>(null);
-  const [resolvedField, setResolvedField] = useState("");
+  const [numberField, setNumberField] = useState("");
   const [configError, setConfigError] = useState<string | null>(null);
   const [status, setStatus] = useState<Status>("idle");
   const [message, setMessage] = useState("");
@@ -61,19 +61,15 @@ export default function ExportPage() {
         client.selectWorksheet(cfg.worksheetName);
         try {
           const names = await client.getFieldNames();
-          const useField = cfg.mode === "field";
-          const target = useField
-            ? cfg.pageFieldMatch ?? "page"
-            : cfg.numberFieldMatch ?? "no";
-          const match = findInner(names, target);
+          const match = findInner(names, cfg.numberFieldMatch ?? "no");
           if (!match) {
             setConfigError(
               `Configured worksheet "${cfg.worksheetName}" has no field matching ` +
-                `"${target}". Available fields: ${names.join(", ") || "(none)"}.`
+                `"${cfg.numberFieldMatch ?? "no"}". Available fields: ${names.join(", ") || "(none)"}.`
             );
             return;
           }
-          setResolvedField(match);
+          setNumberField(match);
         } catch (err: any) {
           setConfigError(err?.message || "Could not read fields from the configured worksheet.");
         }
@@ -107,7 +103,7 @@ export default function ExportPage() {
   }, []);
 
   async function handleExport() {
-    if (!ready || status === "working" || !config || !resolvedField) return;
+    if (!ready || status === "working" || !config || !numberField) return;
     setStatus("working");
     setError(null);
     setMessage("Starting...");
@@ -123,15 +119,13 @@ export default function ExportPage() {
 
       const orchestrator = new ExportOrchestrator(client);
 
-      const mode = config.mode ?? "computeFromNo";
       const opts: ExportOptions = {
-        mode,
+        mode: "computeFromNo",
         titleBase: config.titleBase,
         headerLines: config.headerLines ? [...config.headerLines] : undefined,
         columnLayout: config.columns,
-        ...(mode === "field"
-          ? { pageField: resolvedField }
-          : { numberField: resolvedField, pageSize: config.pageSize }),
+        numberField,
+        pageSize: config.pageSize,
         onProgress: (m) => setMessage(m)
       };
 
