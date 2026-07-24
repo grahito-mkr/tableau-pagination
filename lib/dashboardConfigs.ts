@@ -61,7 +61,7 @@ export const DASHBOARD_CONFIGS: Record<string, DashboardConfig> = {
   // Double Tree by Hilton Jakarta Bintaro Raya — Salary report.
   "Salary Report (3)": {
     worksheetName: "Salary Report Pagination",
-    pageSize: 5,
+    pageSize: 2,
     titleBase: "Report",
     headerLines: ["DOUBLE TREE BY HILTON JAKARTA BINTARO RAYA", "REPORT SALARY CRYSTAL REPORT"],
     columns: [
