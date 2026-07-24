@@ -179,17 +179,23 @@ export class ExportOrchestrator {
       return a.localeCompare(b);
     });
 
-    // Sanity guard: catch an obviously-wrong field (e.g. a unique per-row id
-    // that would yield one "page" per row). Legitimate reports here can have
-    // ~1000 pages, so the ceiling is high; it only trips on clearly-wrong input
-    // where distinct values approach the row count.
+    // Sanity guard (computeFromNo only): catch an obviously-wrong row-number
+    // field — e.g. a unique per-row id that would yield one "page" per row. In
+    // "field" mode the config points at an explicit Page column, so we trust
+    // it and skip this check. Legitimate reports can have ~1000 pages, so the
+    // ceiling is high; it only trips when distinct values approach row count.
     const distinctRatio = sortedKeys.length / rows.length;
-    if (sortedKeys.length > 2000 || (sortedKeys.length > 300 && distinctRatio > 0.9)) {
+    if (
+      mode === "computeFromNo" &&
+      (sortedKeys.length > 2000 || (sortedKeys.length > 300 && distinctRatio > 0.9))
+    ) {
       const sample = sortedKeys.slice(0, 8).join(", ");
       throw new Error(
-        `Field produced ${sortedKeys.length} groups from ${rows.length} rows ` +
-          `(sample: ${sample}...). That looks like a per-row id rather than a page number. ` +
-          `If you meant to compute pages from the row number, choose "Compute from row number".`
+        `This dashboard's export is misconfigured: the row-number field produced ` +
+          `${sortedKeys.length} pages from ${rows.length} rows (sample: ${sample}...), ` +
+          `which looks like a per-row id, not a row number. Ask the report admin to fix ` +
+          `the dashboard config — set a correct "pageSize", or use "mode": "field" if the ` +
+          `worksheet already has a Page column.`
       );
     }
 
