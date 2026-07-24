@@ -72,7 +72,7 @@ export const DASHBOARD_CONFIGS: Record<string, DashboardConfig> = {
       { label: "PTKP", match: ["ptkp"] },
       { label: "Employee Tax Status", match: ["employee tax status"] },
       { label: "Join Date", match: ["join date"] },
-      { label: "Component", match: ["component", "measure names"], width: 16 },
+      { label: "Component", match: ["component", "measure names"], width: 18 },
       { label: "Amount", match: ["amount", "measure values", "total_amount", "total amount"], width: 20 }
     ]
   },
