@@ -123,6 +123,7 @@ export default function ExportPage() {
         mode: "computeFromNo",
         titleBase: config.titleBase,
         headerLines: config.headerLines ? [...config.headerLines] : undefined,
+        columnLayout: config.columns,
         numberField,
         pageSize: config.pageSize,
         onProgress: (m) => setMessage(m)
