@@ -1,5 +1,5 @@
 /**
- * Per-dashboard configuration, keyed by Tableau dashboard ID.
+ * Per-dashboard configuration, keyed by Tableau dashboard NAME.
  *
  * This is the single place that decides what happens when someone clicks
  * Export on a given dashboard — which worksheet to read, how many rows per
@@ -7,11 +7,15 @@
  * or edit any of this; the UI is just an Export button.
  *
  * To add a new dashboard:
- *  1. Open the extension on that dashboard once. Since its ID won't be in
- *     this file yet, the panel will show you the exact dashboard ID and the
- *     list of worksheet names on it.
- *  2. Add an entry below using that ID as the key.
+ *  1. Open the extension on that dashboard once. If its name isn't a key in
+ *     this file yet, the panel shows you the exact dashboard name to use and
+ *     the list of worksheet names on it.
+ *  2. Add an entry below using that dashboard name as the key.
  *  3. Redeploy.
+ *
+ * Single-report deployments: if only ONE entry exists here, the extension
+ * uses it automatically even if the name doesn't match — so the button just
+ * works without any name lookup.
  */
 
 export interface DashboardConfig {
@@ -37,7 +41,7 @@ export interface DashboardConfig {
 
 export const DASHBOARD_CONFIGS: Record<string, DashboardConfig> = {
   // Double Tree by Hilton Jakarta Bintaro Raya — Salary report.
-  "f5dbc038-1dc4-4319-ab17-d9fe608e5684": {
+  "Salary Report (3)": {
     worksheetName: "Salary Report Pagination",
     pageSize: 5,
     titleBase: "Report",
@@ -45,9 +49,10 @@ export const DASHBOARD_CONFIGS: Record<string, DashboardConfig> = {
   }
 
   // Add additional dashboards here, e.g.:
-  // "REPLACE_WITH_LEADS_DASHBOARD_ID": {
+  // "Leads Dashboard": {
   //   worksheetName: "Leads with Details",
   //   pageSize: 5,
-  //   titleBase: "Report"
+  //   titleBase: "Leads Report",
+  //   headerLines: ["YOUR COMPANY", "LEADS REPORT"]
   // }
 };
