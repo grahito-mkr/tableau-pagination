@@ -233,7 +233,7 @@ export class ExportOrchestrator {
   async export(options: ExportOptions): Promise<Blob> {
     const { pages, truncated } = await this.buildPages(options);
 
-    options.onProgress?.(`Generating ${pages.length} PDF${pages.length === 1 ? "" : "s"}...`);
+    options.onProgress?.(`Building ${pages.length} page${pages.length === 1 ? "" : "s"}...`);
 
     const response = await fetch("/api/export-pdfs", {
       method: "POST",
