@@ -208,6 +208,22 @@ export class TableauClient {
     }
   }
 
+  /**
+   * Names of every Parameter defined on this dashboard — diagnostic helper
+   * so a "field/parameter not found" warning can list what actually exists,
+   * instead of the caller having to guess the exact name a second time.
+   */
+  async getAllParameterNames(): Promise<string[]> {
+    const tableau = (window as any).tableau;
+    if (!tableau) return [];
+    try {
+      const params = await tableau.extensions.dashboardContent.dashboard.getParametersAsync();
+      return params.map((p: any) => String(p.name));
+    } catch {
+      return [];
+    }
+  }
+
   saveState(key: string, state: unknown): void {
     const tableau = (window as any).tableau;
     if (!tableau) return;

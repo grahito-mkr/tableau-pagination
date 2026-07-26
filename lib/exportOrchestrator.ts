@@ -18,7 +18,7 @@
  */
 
 import { TableauClient, type DataRow } from "./tableauClient";
-import type { ColumnSpec } from "./dashboardConfigs";
+import type { ColumnSpec, RowSortSpec, LogoSpec } from "./dashboardConfigs";
 
 /** One column of the signature block, e.g. "Prepared by / Admin & Payroll / (Name)". */
 export interface SignatureEntry {
@@ -66,6 +66,16 @@ export interface PageData {
   signature?: SignatureEntry[];
 }
 
+/** Whole-export metadata drawn once per physical PDF page: logo top-left,
+ * "Print date"/"Print by" top-right. */
+export interface ExportMeta {
+  /** "DD-MM-YYYY hh:mm", resolved at export time. */
+  generatedAt: string;
+  /** Resolved value of the configured `printedByMatch` field, if found. */
+  printedBy?: string;
+  logo?: LogoSpec;
+}
+
 export interface ExportOptions {
   /**
    * How pages are determined:
@@ -96,7 +106,119 @@ export interface ExportOptions {
   /** PDF column layout (which columns, order, labels, widths) passed straight
    * through to the API route. Omit to render every returned field generically. */
   columnLayout?: ColumnSpec[];
+  /** Optional row ordering applied within each "No" group before pagination —
+   * see RowSortSpec. Omit to keep the order Tableau's summary-data query
+   * returns. */
+  rowSort?: RowSortSpec;
+  /** Logo shown top-left of every physical PDF page. Omit to show no logo. */
+  logo?: LogoSpec;
+  /** Alias list identifying the worksheet field holding the current viewer's
+   * username, shown top-right as "Print by: <value>". Omit to hide it. */
+  printedByMatch?: string[];
+  /** Alias lists identifying worksheet fields (columns) holding the report's
+   * period, e.g. "Period Start"/"Period End" — resolved from the first
+   * exported row, same as `printedByMatch`. Takes priority over the
+   * Start Date/End Date Parameter lookup below; set this when the period is
+   * a worksheet column rather than a dashboard Parameter. */
+  periodMatch?: { start: string[]; end: string[] };
+  /** When true, ignore `mode`/`pageField`/`numberField`/`pageSize` entirely
+   * and hand the WHOLE row set (already row-sorted) to the compact renderer,
+   * which packs "No" groups onto physical pages purely by how much fits. */
+  compactPacking?: boolean;
   onProgress?: (message: string) => void;
+}
+
+/** Formats a Date as "DD-MM-YYYY HH:mm" in Asia/Jakarta (WIB, UTC+7), regardless
+ * of the server's own timezone. */
+function formatPrintDate(date: Date): string {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Jakarta",
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false
+  }).formatToParts(date);
+  const get = (type: string) => parts.find((p) => p.type === type)?.value ?? "";
+  return `${get("day")}-${get("month")}-${get("year")} ${get("hour")}:${get("minute")}`;
+}
+
+/** Strip a Tableau aggregation wrapper and lowercase, e.g. "AGG(Tax_Mode)" -> "tax_mode". */
+function cleanInner(name: string): string {
+  const m = name.match(/^[A-Za-z]+\(([^)]+)\)\s*$/);
+  return (m ? m[1] : name).trim().toLowerCase();
+}
+
+/** Find the first column whose cleaned inner name matches any alias in `match`. */
+function findColumnByMatch(columns: string[], match: string[]): string | undefined {
+  const wanted = match.map((m) => m.toLowerCase());
+  return columns.find((c) => wanted.includes(cleanInner(c)));
+}
+
+/** Find the value in a Parameter-name-keyed map whose key matches any alias
+ * in `aliases` (case-insensitive) — `getParameterValues` returns keys with
+ * their real on-dashboard casing, which won't necessarily match a lowercase
+ * alias list directly. */
+function pickByAlias(values: Record<string, string>, aliases: string[]): string | undefined {
+  const wanted = new Set(aliases.map((a) => a.toLowerCase()));
+  for (const key of Object.keys(values)) {
+    if (wanted.has(key.toLowerCase())) return values[key];
+  }
+  return undefined;
+}
+
+/**
+ * Reorders rows within each "No" group according to `spec`: first by a fixed
+ * manual priority list (e.g. tax_mode category order), then alphabetically as
+ * a tiebreaker. Rows are never moved across "No" groups — only the order of
+ * rows sharing the same "No" value changes, and groups themselves keep their
+ * original first-seen order. If the configured field(s) aren't found, or no
+ * spec is given, the rows are returned unchanged.
+ */
+function applyRowSort(rows: DataRow[], columns: string[], spec?: RowSortSpec): DataRow[] {
+  if (!spec) return rows;
+  const sortCol = findColumnByMatch(columns, spec.match);
+  if (!sortCol) return rows;
+  const alphaCol = spec.thenAlphabetical ? findColumnByMatch(columns, spec.thenAlphabetical.match) : undefined;
+  const noCol = findColumnByMatch(columns, ["no"]);
+
+  const rank = new Map(spec.order.map((v, i) => [v.toLowerCase(), i]));
+  const rankFor = (v: string) => rank.get(v.toLowerCase()) ?? spec.order.length;
+
+  // Partition into consecutive-by-appearance groups keyed by "No", preserving
+  // first-seen group order.
+  const groupOrder: string[] = [];
+  const groups = new Map<string, DataRow[]>();
+  for (const row of rows) {
+    const key = noCol ? row[noCol] ?? "" : "";
+    if (!groups.has(key)) {
+      groups.set(key, []);
+      groupOrder.push(key);
+    }
+    groups.get(key)!.push(row);
+  }
+
+  const result: DataRow[] = [];
+  for (const key of groupOrder) {
+    const group = groups.get(key)!;
+    const ordered = group
+      .map((row, i) => ({ row, i })) // keep original index as a stable tiebreak
+      .sort((a, b) => {
+        const ra = rankFor(a.row[sortCol] ?? "");
+        const rb = rankFor(b.row[sortCol] ?? "");
+        if (ra !== rb) return ra - rb;
+        if (alphaCol) {
+          const va = (a.row[alphaCol] ?? "").toLowerCase();
+          const vb = (b.row[alphaCol] ?? "").toLowerCase();
+          if (va !== vb) return va < vb ? -1 : 1;
+        }
+        return a.i - b.i;
+      })
+      .map((x) => x.row);
+    result.push(...ordered);
+  }
+  return result;
 }
 
 /**
@@ -121,19 +243,175 @@ export class ExportOrchestrator {
   constructor(private client: TableauClient) {}
 
   /**
+   * Human-readable diagnostics from the most recent `buildPages`/`export`
+   * call — e.g. "Print by"/"Period" fields that didn't resolve. These are
+   * also `console.warn`'d as they happen (for anyone who does have DevTools
+   * open), but reading this array after `export()` resolves is the easier
+   * path when testing directly inside Tableau Desktop, where opening the
+   * embedded extension's DevTools isn't always straightforward. Reset at
+   * the start of every `buildPages` call.
+   */
+  lastWarnings: string[] = [];
+
+  /**
+   * The resolved "Period <start> to <end>" line from the most recent
+   * `buildPages` call (same value shown under the letterhead), or undefined
+   * if it couldn't be resolved. Handy for building a descriptive download
+   * filename without re-deriving it. Reset at the start of every
+   * `buildPages` call.
+   */
+  lastPeriodLabel: string | undefined;
+
+  private warn(message: string): void {
+    this.lastWarnings.push(message);
+    console.warn(message);
+  }
+
+  /**
    * Build the per-page payload from the underlying data.
    */
-  async buildPages(options: ExportOptions): Promise<{ pages: PageData[]; truncated: boolean }> {
+  async buildPages(options: ExportOptions): Promise<{ pages: PageData[]; truncated: boolean; meta: ExportMeta }> {
+    this.lastWarnings = [];
+    this.lastPeriodLabel = undefined;
     const { mode, pageField, numberField, titleBase, headerLines, onProgress } = options;
     const pageSize = options.pageSize && options.pageSize > 0 ? options.pageSize : 5;
 
-    onProgress?.("Reading data...");
-    const { columns, rows, truncated } = await this.client.getRows();
+    onProgress?.("Preparing export...");
+    const { columns, rows: rawRows, truncated } = await this.client.getRows();
 
-    if (rows.length === 0) {
+    if (rawRows.length === 0) {
       throw new Error(
         "No rows were returned. Check that the worksheet has data for the current filters."
       );
+    }
+
+    // Optional per-dashboard row ordering (e.g. Component category order,
+    // then alphabetical) applied within each "No" group, before pagination.
+    const rows = applyRowSort(rawRows, columns, options.rowSort);
+
+    // Diagnostic: some Component values can end up with a blank Amount even
+    // though Tableau shows a value for them in the worksheet. This is NOT a
+    // rendering/truncation issue in the PDF (every other Amount renders in
+    // full) — it means the specific measure behind that one component isn't
+    // included in this worksheet's Measure Values pivot, or resolves to null
+    // in this context, so the cell is genuinely empty in the exported data.
+    // Log the raw fields for one row per affected component (open the
+    // browser console during export) so the actual field name backing that
+    // component's amount can be identified and added to the Amount column's
+    // `match` aliases if it's simply named differently.
+    if (options.columnLayout) {
+      const amountSpec = options.columnLayout.find((c) => c.label.toLowerCase() === "amount");
+      const componentSpec = options.columnLayout.find((c) => c.label.toLowerCase() === "component");
+      const amountCol = amountSpec ? findColumnByMatch(columns, amountSpec.match) : undefined;
+      const componentCol = componentSpec ? findColumnByMatch(columns, componentSpec.match) : undefined;
+      if (amountCol && componentCol) {
+        const seen = new Set<string>();
+        for (const row of rows) {
+          const comp = (row[componentCol] ?? "").trim();
+          const amt = (row[amountCol] ?? "").trim();
+          if (comp && !amt && !seen.has(comp)) {
+            seen.add(comp);
+            this.warn(
+              `Component "${comp}" has a blank Amount (resolved from field "${amountCol}"). ` +
+                `Raw fields for this row: ${JSON.stringify(row)}`
+            );
+          }
+        }
+      }
+    }
+
+    // "Print by": resolve the configured username field from the first row
+    // (it's a constant per export, e.g. a USERNAME() calc, not a per-row
+    // value). Best-effort — omitted if the field isn't found. If it's
+    // configured but doesn't resolve, this is almost always because the
+    // field is visible in the data source's Tables list but hasn't actually
+    // been dropped onto THIS worksheet's Marks/Detail shelf — summary data
+    // only includes fields the worksheet itself uses. Logged (not thrown) so
+    // the export still completes without the "Print by" line.
+    const printedByCol = options.printedByMatch ? findColumnByMatch(columns, options.printedByMatch) : undefined;
+    if (options.printedByMatch && !printedByCol) {
+      this.warn(
+        `"Print by" field not found (looked for: ${options.printedByMatch.join(", ")}). ` +
+          `This usually means the field isn't on this worksheet's Marks/Detail shelf yet — ` +
+          `being visible in the data source's Tables list isn't enough. ` +
+          `Fields available on worksheet "${this.client.worksheetName}": ${columns.join(", ") || "(none)"}.`
+      );
+    }
+    const printedBy = printedByCol ? rawRows[0]?.[printedByCol] : undefined;
+    const meta: ExportMeta = {
+      generatedAt: formatPrintDate(new Date()),
+      printedBy: printedBy || undefined,
+      logo: options.logo
+    };
+
+    // Letterhead header: static lines from the UI, plus the "Period X to Y"
+    // line, tried in order: (1) `periodMatch` as worksheet columns (resolved
+    // from the first row, like `printedBy`), (2) `periodMatch`'s alias words
+    // as Parameter names instead — a "Period Start"/"Period End" control on
+    // the dashboard is very often a Parameter, not a column, even though it
+    // looks like a field — (3) the legacy hardcoded "Start Date"/"End Date"
+    // Parameter names. Best-effort throughout — if none resolve, the period
+    // line is omitted and a console.warn lists every worksheet column AND
+    // every dashboard Parameter name that actually exists, to pin down the
+    // real one.
+    const staticLines = (headerLines ?? []).map((l) => l.trim()).filter(Boolean);
+
+    let period: string | undefined;
+    if (options.periodMatch) {
+      const startCol = findColumnByMatch(columns, options.periodMatch.start);
+      const endCol = findColumnByMatch(columns, options.periodMatch.end);
+      const periodStart = startCol ? rawRows[0]?.[startCol] : undefined;
+      const periodEnd = endCol ? rawRows[0]?.[endCol] : undefined;
+      if (periodStart && periodEnd) period = `Period ${periodStart} to ${periodEnd}`;
+    }
+    if (!period) {
+      onProgress?.("Checking details...");
+      const startAliases = [PERIOD_PARAMS.start, ...(options.periodMatch?.start ?? [])];
+      const endAliases = [PERIOD_PARAMS.end, ...(options.periodMatch?.end ?? [])];
+      const periodValues = await this.client.getParameterValues([...startAliases, ...endAliases]);
+      const periodStart = pickByAlias(periodValues, startAliases);
+      const periodEnd = pickByAlias(periodValues, endAliases);
+      period = periodStart && periodEnd ? `Period ${periodStart} to ${periodEnd}` : undefined;
+
+      if (!period) {
+        const paramNames = await this.client.getAllParameterNames();
+        this.warn(
+          `Period not resolved as either a worksheet column or a dashboard Parameter. ` +
+            `Looked for: ${[...new Set([...startAliases, ...endAliases])].join(", ")}. ` +
+            `Fields available on worksheet "${this.client.worksheetName}": ${columns.join(", ") || "(none)"}. ` +
+            `Parameters available on this dashboard: ${paramNames.join(", ") || "(none)"}.`
+        );
+      }
+    }
+
+    this.lastPeriodLabel = period;
+
+    const header: ReportHeader | undefined =
+      staticLines.length > 0 || period ? { lines: staticLines, period } : undefined;
+
+    // Signature block: read the four sign-off Parameters (best effort — if
+    // they're missing on this dashboard, the block is simply omitted rather
+    // than failing the export).
+    const paramValues = await this.client.getParameterValues(SIGNATURE_SPEC.map((s) => s.role));
+    const signature: SignatureEntry[] = SIGNATURE_SPEC.filter((s) => paramValues[s.role] != null).map(
+      (s) => ({ title: s.title, role: s.role, name: paramValues[s.role] })
+    );
+
+    // Compact mode: skip Tableau's own Page/No grouping entirely. Hand the
+    // whole (already row-sorted) row set to the compact renderer as a single
+    // logical unit — it packs "No" groups onto physical pages purely by how
+    // much fits, and computes its own true physical page numbers, instead of
+    // however many Tableau "pages" a fixed pageSize produced.
+    if (options.compactPacking) {
+      const page: PageData = {
+        pageNumber: "1",
+        title: titleBase,
+        columns,
+        rows
+      };
+      if (header) page.header = header;
+      if (signature.length > 0) page.signature = signature;
+      return { pages: [page], truncated, meta };
     }
 
     // Determine which column we read, and validate it exists.
@@ -144,7 +422,7 @@ export class ExportOrchestrator {
       );
     }
 
-    onProgress?.("Grouping by page...");
+    onProgress?.("Organizing report...");
 
     // Compute a page key for each row depending on the mode.
     const keyForRow = (row: DataRow): string => {
@@ -179,17 +457,23 @@ export class ExportOrchestrator {
       return a.localeCompare(b);
     });
 
-    // Sanity guard: catch an obviously-wrong field (e.g. a unique per-row id
-    // that would yield one "page" per row). Legitimate reports here can have
-    // ~1000 pages, so the ceiling is high; it only trips on clearly-wrong input
-    // where distinct values approach the row count.
+    // Sanity guard (computeFromNo only): catch an obviously-wrong row-number
+    // field — e.g. a unique per-row id that would yield one "page" per row. In
+    // "field" mode the config points at an explicit Page column, so we trust
+    // it and skip this check. Legitimate reports can have ~1000 pages, so the
+    // ceiling is high; it only trips when distinct values approach row count.
     const distinctRatio = sortedKeys.length / rows.length;
-    if (sortedKeys.length > 2000 || (sortedKeys.length > 300 && distinctRatio > 0.9)) {
+    if (
+      mode === "computeFromNo" &&
+      (sortedKeys.length > 2000 || (sortedKeys.length > 300 && distinctRatio > 0.9))
+    ) {
       const sample = sortedKeys.slice(0, 8).join(", ");
       throw new Error(
-        `Field produced ${sortedKeys.length} groups from ${rows.length} rows ` +
-          `(sample: ${sample}...). That looks like a per-row id rather than a page number. ` +
-          `If you meant to compute pages from the row number, choose "Compute from row number".`
+        `This dashboard's export is misconfigured: the row-number field produced ` +
+          `${sortedKeys.length} pages from ${rows.length} rows (sample: ${sample}...), ` +
+          `which looks like a per-row id, not a row number. Ask the report admin to fix ` +
+          `the dashboard config — set a correct "pageSize", or use "mode": "field" if the ` +
+          `worksheet already has a Page column.`
       );
     }
 
@@ -200,49 +484,39 @@ export class ExportOrchestrator {
       rows: groups.get(key)!
     }));
 
-    // Letterhead header: static lines from the UI, plus the "Period X to Y"
-    // line auto-resolved from the Start Date/End Date Parameters (best
-    // effort — omitted if those parameters don't exist on this dashboard).
-    // Repeated on every page, mirroring the dashboard's own header.
-    const staticLines = (headerLines ?? []).map((l) => l.trim()).filter(Boolean);
-    onProgress?.("Reading report header...");
-    const periodValues = await this.client.getParameterValues([PERIOD_PARAMS.start, PERIOD_PARAMS.end]);
-    const periodStart = periodValues[PERIOD_PARAMS.start];
-    const periodEnd = periodValues[PERIOD_PARAMS.end];
-    const period = periodStart && periodEnd ? `Period ${periodStart} to ${periodEnd}` : undefined;
-
-    if (staticLines.length > 0 || period) {
-      const header: ReportHeader = { lines: staticLines, period };
+    if (header) {
       for (const p of pages) p.header = header;
     }
 
-    // Signature block: read the four sign-off Parameters (best effort — if
-    // they're missing on this dashboard, the block is simply omitted rather
-    // than failing the export) and attach to the last page only.
-    onProgress?.("Reading signature block...");
-    const paramValues = await this.client.getParameterValues(SIGNATURE_SPEC.map((s) => s.role));
-    const signature: SignatureEntry[] = SIGNATURE_SPEC.filter((s) => paramValues[s.role] != null).map(
-      (s) => ({ title: s.title, role: s.role, name: paramValues[s.role] })
-    );
+    // Attach the signature block to the last page only.
     if (signature.length > 0 && pages.length > 0) {
       pages[pages.length - 1].signature = signature;
     }
 
-    return { pages, truncated };
+    return { pages, truncated, meta };
   }
 
   /**
    * Full export: build pages, POST to backend, return the PDF blob.
    */
   async export(options: ExportOptions): Promise<Blob> {
-    const { pages, truncated } = await this.buildPages(options);
-
-    options.onProgress?.(`Building ${pages.length} page${pages.length === 1 ? "" : "s"}...`);
+    const { pages, truncated, meta } = await this.buildPages(options);
 
     const response = await fetch("/api/export-pdfs", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ pages, layout: options.columnLayout })
+      body: JSON.stringify({
+        pages,
+        layout: options.columnLayout,
+        meta,
+        compact: !!options.compactPacking,
+        // Sent along so the Next.js server can print these to its own
+        // terminal (visible in VS Code when running `npm run dev`) — the
+        // browser console these were originally warn()'d to is the
+        // extension's own embedded webview inside Tableau, which isn't the
+        // terminal the dev server runs in.
+        warnings: this.lastWarnings
+      })
     });
 
     if (!response.ok) {
