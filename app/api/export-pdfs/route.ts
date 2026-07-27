@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import fs from "fs";
 import path from "path";
+import zlib from "zlib";
 import type { ColumnSpec } from "@/lib/dashboardConfigs";
 import { renderAllPages, renderCompact, type PageData, type ExportMeta } from "@/lib/pdfRenderer";
 
@@ -30,7 +31,19 @@ interface ExportRequest {
 
 export async function POST(req: NextRequest) {
   try {
-    const body: ExportRequest = await req.json();
+    // The client gzip-compresses the request body for large (many-employee,
+    // compact-mode) exports to stay under Vercel's request size limit — see
+    // `ExportOrchestrator.export()`. Decode it back to the original JSON
+    // text ourselves when that header is present; otherwise read the body
+    // as plain JSON as before.
+    let bodyText: string;
+    if (req.headers.get("content-encoding") === "gzip") {
+      const compressed = Buffer.from(await req.arrayBuffer());
+      bodyText = zlib.gunzipSync(compressed).toString("utf-8");
+    } else {
+      bodyText = await req.text();
+    }
+    const body: ExportRequest = JSON.parse(bodyText);
     const { pages, layout, meta, compact, warnings } = body;
 
     if (!Array.isArray(pages) || pages.length === 0) {
