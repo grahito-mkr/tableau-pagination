@@ -502,21 +502,44 @@ export class ExportOrchestrator {
   async export(options: ExportOptions): Promise<Blob> {
     const { pages, truncated, meta } = await this.buildPages(options);
 
+    const payload = JSON.stringify({
+      pages,
+      layout: options.columnLayout,
+      meta,
+      compact: !!options.compactPacking,
+      // Sent along so the Next.js server can print these to its own
+      // terminal (visible in VS Code when running `npm run dev`) — the
+      // browser console these were originally warn()'d to is the
+      // extension's own embedded webview inside Tableau, which isn't the
+      // terminal the dev server runs in.
+      warnings: this.lastWarnings
+    });
+
+    // Large compact-mode exports (many employees flattened into one request)
+    // can produce a multi-megabyte JSON body — Vercel rejects requests over
+    // ~4.5MB at the platform level, BEFORE the route handler even runs (that
+    // shows up as a generic host error page, not our own JSON error).
+    // Gzip-compressing the body client-side (this JSON is highly repetitive
+    // — the same column names over and over — so it compresses very well,
+    // often 5-10x) keeps large exports under that limit. Falls back to
+    // sending the plain JSON if the browser/webview doesn't support
+    // CompressionStream.
+    let body: BodyInit = payload;
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (typeof CompressionStream !== "undefined") {
+      try {
+        const stream = new Blob([payload]).stream().pipeThrough(new CompressionStream("gzip"));
+        body = await new Response(stream).blob();
+        headers["Content-Encoding"] = "gzip";
+      } catch {
+        body = payload;
+      }
+    }
+
     const response = await fetch("/api/export-pdfs", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        pages,
-        layout: options.columnLayout,
-        meta,
-        compact: !!options.compactPacking,
-        // Sent along so the Next.js server can print these to its own
-        // terminal (visible in VS Code when running `npm run dev`) — the
-        // browser console these were originally warn()'d to is the
-        // extension's own embedded webview inside Tableau, which isn't the
-        // terminal the dev server runs in.
-        warnings: this.lastWarnings
-      })
+      headers,
+      body
     });
 
     if (!response.ok) {
