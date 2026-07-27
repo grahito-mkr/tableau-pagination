@@ -522,10 +522,24 @@ export class ExportOrchestrator {
     if (!response.ok) {
       let msg = `Export failed (HTTP ${response.status})`;
       try {
-        const err = await response.json();
-        if (err?.error) msg = `Export failed: ${err.error}`;
+        // Read as text first (always works), then try to parse it as our
+        // own JSON error shape. If it ISN'T JSON — e.g. Vercel's own
+        // platform-level error page (a payload-too-large rejection, a
+        // timeout, etc.) rather than something our route handler returned —
+        // show that raw text instead of silently swallowing it, so
+        // whatever's available reaches the extension's own UI even when
+        // there's no practical way to check server logs.
+        const bodyText = await response.text();
+        try {
+          const err = JSON.parse(bodyText);
+          if (err?.error) msg = `Export failed: ${err.error}`;
+        } catch {
+          if (bodyText.trim()) {
+            msg = `Export failed (HTTP ${response.status}): ${bodyText.trim().slice(0, 800)}`;
+          }
+        }
       } catch {
-        /* ignore */
+        /* reading the response body itself failed — keep the generic message */
       }
       throw new Error(msg);
     }
