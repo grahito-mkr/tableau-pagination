@@ -2,7 +2,10 @@
 const nextConfig = {
   reactStrictMode: true,
   experimental: {
-    serverComponentsExternalPackages: ["pdfkit"]
+    serverComponentsExternalPackages: ["pdfkit"],
+    outputFileTracingIncludes: {
+      "/api/**/*": ["./node_modules/pdfkit/js/data/**"]
+    }
   }
 };
 
