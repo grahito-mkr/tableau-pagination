@@ -185,7 +185,7 @@ export default function ExportPage() {
       setTimeout(() => {
         setStatus((s) => (s === "done" ? "idle" : s));
         setMessage((m) => (m === "Export complete." ? "" : m));
-      }, 5000);
+      }, 4000);
     } catch (err: any) {
       setError(err?.message || "Export failed");
       setStatus("error");
@@ -234,8 +234,21 @@ export default function ExportPage() {
       {ready && config && !configError && (
         <>
           {error && (
-            <div style={{ background: "#fee", border: "1px solid #fcc", borderRadius: 6, padding: 8, marginBottom: 8, color: "crimson", textAlign: "left", fontSize: 11 }}>
-              {error}
+            <div
+              style={{
+                background: "#fee",
+                border: "1px solid #fcc",
+                borderRadius: 6,
+                padding: 8,
+                marginBottom: 8,
+                color: "crimson",
+                textAlign: "left",
+                fontSize: 11,
+                maxHeight: 160,
+                overflowY: "auto"
+              }}
+            >
+              <pre style={{ margin: 0, whiteSpace: "pre-wrap", wordBreak: "break-word", fontFamily: "inherit" }}>{error}</pre>
             </div>
           )}
 
@@ -274,7 +287,7 @@ export default function ExportPage() {
               cursor: busy ? "not-allowed" : "pointer"
             }}
           >
-            {busy ? "Exporting..." : "Download PDF"}
+            {busy ? "Exporting..." : "Export"}
           </button>
         </>
       )}
