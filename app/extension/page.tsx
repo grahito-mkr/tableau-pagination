@@ -287,7 +287,7 @@ export default function ExportPage() {
               cursor: busy ? "not-allowed" : "pointer"
             }}
           >
-            {busy ? "Exporting..." : "Export"}
+            {busy ? "Exporting..." : "Download PDF"}
           </button>
         </>
       )}

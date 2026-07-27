@@ -150,6 +150,47 @@ function fixedMetaLines(meta: ExportMeta | undefined): string[] {
   return lines;
 }
 
+/** PDFKit's internal decoded-image descriptor (has `.width`/`.height`, and
+ * gets a `.obj` PDF object reference attached the first time it's actually
+ * embedded on a page). Not in PDFKit's type definitions, hence `any`. */
+type OpenedImage = any;
+
+/**
+ * Decodes the logo image exactly once per export, up front, instead of
+ * letting every physical page decode and embed its own separate copy.
+ *
+ * PDFKit only caches images via its internal `_imageRegistry` when they're
+ * opened from a **string** source (e.g. a file path) — passing a `Buffer`
+ * (which is what this app always does, since the logo is read from disk
+ * into memory once) skips that cache entirely. `drawChrome` used to call
+ * `doc.image(logoBuffer, ...)` on every physical page, so PDFKit re-decoded
+ * and re-embedded a brand new copy of the logo on every single page. For a
+ * short report that's harmless; for a ~5,000-row report spanning 150+
+ * physical pages, that's 150+ full decoded copies of the logo held in
+ * memory at once (compounded by `bufferPages: true` keeping every page
+ * around until the document finishes) — the actual cause of Vercel OOM
+ * kills on larger exports, not the row data itself.
+ *
+ * Calling this once and passing the same returned object to every
+ * `drawChrome` call fixes that: PDFKit recognizes the identical
+ * already-opened descriptor, embeds it only the first time, and every later
+ * page just references that one copy.
+ */
+function openLogoOnce(doc: PDFKit.PDFDocument, logoBuffer: Buffer | null): OpenedImage | null {
+  if (!logoBuffer) return null;
+  try {
+    // `openImage` exists at runtime but isn't in PDFKit's type definitions.
+    return (doc as any).openImage(logoBuffer);
+  } catch (err: any) {
+    // Corrupt/unreadable image — skip the logo rather than failing the
+    // export, but log it: PDFKit's built-in PNG/JPEG decoder can choke on
+    // some files (e.g. 16-bit PNGs, certain interlaced/indexed PNGs) with
+    // no other indication something's wrong.
+    console.warn(`Logo image failed to render (export continues without it). Reason: ${err?.message || err}`);
+    return null;
+  }
+}
+
 /**
  * Draws the "page chrome" shared by every physical PDF page: the logo on
  * the left, the dashboard's own centered letterhead (`header.lines` +
@@ -172,7 +213,7 @@ export function drawChrome(
   doc: PDFKit.PDFDocument,
   header: ReportHeader | undefined,
   meta: ExportMeta | undefined,
-  logoBuffer: Buffer | null,
+  logoImg: OpenedImage | null,
   pageOfPositions?: number[]
 ): void {
   const startX = doc.page.margins.left;
@@ -187,27 +228,18 @@ export function drawChrome(
   const reservedLines = meta ? metaLines.length + 1 : 0; // +1 for "Page X of Y"
   const metaBlockHeight = reservedLines * META_LINE_HEIGHT;
 
-  // Logo's rendered size (aspect-ratio preserved fit within the configured box).
+  // Logo's rendered size (aspect-ratio preserved fit within the configured
+  // box). `logoImg` is opened once by the caller (see `openLogoOnce`) and
+  // reused across every physical page's `drawChrome` call — see that
+  // function's comment for why that matters.
   let logoW = 0;
   let logoH = 0;
-  let logoImg: { width: number; height: number } | null = null;
-  if (logoBuffer) {
+  if (logoImg) {
     const maxLogoW = meta?.logo?.maxWidth ?? 70;
     const maxLogoH = meta?.logo?.maxHeight ?? 40;
-    try {
-      // `openImage` exists at runtime but isn't in PDFKit's type definitions.
-      logoImg = (doc as any).openImage(logoBuffer);
-      const scale = Math.min(maxLogoW / logoImg!.width, maxLogoH / logoImg!.height);
-      logoW = logoImg!.width * scale;
-      logoH = logoImg!.height * scale;
-    } catch (err: any) {
-      // Corrupt/unreadable image — skip the logo rather than failing the
-      // export, but log it: PDFKit's built-in PNG/JPEG decoder can choke on
-      // some files (e.g. 16-bit PNGs, certain interlaced/indexed PNGs) with
-      // no other indication something's wrong.
-      console.warn(`Logo image failed to render (export continues without it). Reason: ${err?.message || err}`);
-      logoImg = null;
-    }
+    const scale = Math.min(maxLogoW / logoImg.width, maxLogoH / logoImg.height);
+    logoW = logoImg.width * scale;
+    logoH = logoImg.height * scale;
   }
 
   // Letterhead text height, measured without drawing (doc.heightOfString
@@ -251,9 +283,12 @@ export function drawChrome(
     }
   }
 
-  if (logoBuffer && logoImg) {
+  if (logoImg) {
     const logoY = topY + Math.max(0, (bandHeight - logoH) / 2);
-    doc.image(logoBuffer, startX, logoY, { width: logoW, height: logoH });
+    // Passing the already-opened descriptor (not the raw Buffer) lets
+    // PDFKit recognize it's the same image object it already embedded on
+    // an earlier page, instead of decoding/embedding a brand new copy.
+    doc.image(logoImg, startX, logoY, { width: logoW, height: logoH });
   }
 
   if (hasHeader && header) {
@@ -550,6 +585,15 @@ function drawSignatureBlock(
  * NOT using `compactPacking`. For fully dynamic, per-employee packing across
  * the whole report regardless of Tableau's own page boundaries, see
  * `renderCompact` instead.
+ *
+ * Returns a fully-built `Buffer`. (An earlier version of this function
+ * returned the raw PDFDocument stream so route.ts could pipe it straight
+ * into the HTTP response without buffering — that saved memory in theory,
+ * but produced consistently corrupted downloads once actually deployed:
+ * Vercel's Node.js serverless functions don't reliably support a truly
+ * streamed response body the way a persistent server would, so the
+ * connection was being cut before the stream finished. Reverted to
+ * buffering, which is what was proven to produce valid PDFs.)
  */
 export function renderAllPages(
   pages: PageData[],
@@ -564,6 +608,9 @@ export function renderAllPages(
     doc.on("end", () => resolve(Buffer.concat(chunks)));
     doc.on("error", reject);
 
+    // Decoded once, reused on every physical page — see `openLogoOnce`.
+    const logoImg = openLogoOnce(doc, logoBuffer);
+
     const startX = doc.page.margins.left;
     const usableWidth = doc.page.width - doc.page.margins.left - doc.page.margins.right;
     const bottom = () => doc.page.height - doc.page.margins.bottom;
@@ -577,12 +624,12 @@ export function renderAllPages(
       if (onFreshPage) {
         // Very first group, or the first group after a forced page break —
         // either way the chrome hasn't been drawn for this physical page yet.
-        drawChrome(doc, page.header, meta, logoBuffer, pageOfPositions);
+        drawChrome(doc, page.header, meta, logoImg, pageOfPositions);
         onFreshPage = false;
       } else if (doc.y + needed > bottom()) {
         // Doesn't fit what's left on this page — start a new one.
         doc.addPage(PAGE_OPTS);
-        drawChrome(doc, page.header, meta, logoBuffer, pageOfPositions);
+        drawChrome(doc, page.header, meta, logoImg, pageOfPositions);
       } else {
         // Fits — pack it onto the current page below the previous group,
         // separated by a divider instead of repeating the letterhead.
@@ -609,6 +656,10 @@ export function renderAllPages(
  * per-page title line (the true physical page number already shows in
  * "Page X of Y", so repeating it as a title would just be redundant/
  * confusing, as Tableau's own per-group page numbers were before this).
+ *
+ * Returns a fully-built `Buffer` — see the note on `renderAllPages` for why
+ * (streaming the raw document out was tried and reverted; it produced
+ * corrupted downloads on Vercel).
  */
 export function renderCompact(
   rows: Array<Record<string, string>>,
@@ -626,6 +677,9 @@ export function renderCompact(
     doc.on("end", () => resolve(Buffer.concat(chunks)));
     doc.on("error", reject);
 
+    // Decoded once, reused on every physical page — see `openLogoOnce`.
+    const logoImg = openLogoOnce(doc, logoBuffer);
+
     const cols = resolveColumns(columns, layout);
     const startX = doc.page.margins.left;
     const usableWidth = doc.page.width - doc.page.margins.left - doc.page.margins.right;
@@ -635,7 +689,7 @@ export function renderCompact(
     // Draws chrome + table header on whatever is currently the active
     // physical page. Returns the y to resume rows at.
     const drawPageStart = (): number => {
-      drawChrome(doc, header, meta, logoBuffer, pageOfPositions);
+      drawChrome(doc, header, meta, logoImg, pageOfPositions);
       return drawTableHeaderRow(doc, startX, usableWidth, cols, colX, colW, doc.y);
     };
 

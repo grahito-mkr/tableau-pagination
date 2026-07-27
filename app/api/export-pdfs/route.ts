@@ -3,7 +3,11 @@ import fs from "fs";
 import path from "path";
 import zlib from "zlib";
 import type { ColumnSpec } from "@/lib/dashboardConfigs";
-import { renderAllPages, renderCompact, type PageData, type ExportMeta } from "@/lib/pdfRenderer";
+// Types only here (erased at compile time, zero runtime risk). The actual
+// `renderAllPages`/`renderCompact` functions are imported dynamically inside
+// the try block below instead of statically up here — see the comment
+// there for why.
+import type { PageData, ExportMeta } from "@/lib/pdfRenderer";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -31,19 +35,39 @@ interface ExportRequest {
 
 export async function POST(req: NextRequest) {
   try {
+    // Loaded dynamically (not as a top-of-file static import) specifically
+    // so that if THIS import itself fails — e.g. pdfkit's font/data files
+    // being missing at runtime in this particular deployment, or any other
+    // module-load-time problem inside pdfRenderer.ts/pdfkit — it happens
+    // HERE, inside our own try/catch, instead of before Next.js even routes
+    // the request to this handler. A static-import-time failure crashes
+    // before any of our code runs at all, which Next.js reports as its own
+    // generic, no-detail 500 page — completely invisible to us. Moving the
+    // import inside the try turns that same failure into a normal caught
+    // exception with a real message we can return and show in the UI.
+    const { renderAllPages, renderCompact } = await import("@/lib/pdfRenderer");
+
     // The client gzip-compresses the request body for large (many-employee,
     // compact-mode) exports to stay under Vercel's request size limit — see
     // `ExportOrchestrator.export()`. Decode it back to the original JSON
     // text ourselves when that header is present; otherwise read the body
     // as plain JSON as before.
-    let bodyText: string;
+    // Gzip decoding buffers the whole request twice (compressed +
+    // decompressed text) before JSON.parse makes a third copy as parsed
+    // objects. That's unavoidable for reading the input, but we drop each
+    // reference as soon as we're done with it (rather than keeping
+    // `compressed`/`bodyText` alive for the rest of the request) so they're
+    // eligible for garbage collection before the memory-heavier PDF-building
+    // step below runs.
+    let body: ExportRequest;
     if (req.headers.get("content-encoding") === "gzip") {
       const compressed = Buffer.from(await req.arrayBuffer());
-      bodyText = zlib.gunzipSync(compressed).toString("utf-8");
+      const bodyText = zlib.gunzipSync(compressed).toString("utf-8");
+      body = JSON.parse(bodyText);
     } else {
-      bodyText = await req.text();
+      const bodyText = await req.text();
+      body = JSON.parse(bodyText);
     }
-    const body: ExportRequest = JSON.parse(bodyText);
     const { pages, layout, meta, compact, warnings } = body;
 
     if (!Array.isArray(pages) || pages.length === 0) {
@@ -70,6 +94,11 @@ export async function POST(req: NextRequest) {
       }
     }
 
+    // Streaming the raw PDFDocument straight into the response (an earlier
+    // version of this fix) saved memory in theory, but Vercel's Node.js
+    // serverless functions don't reliably deliver a true streamed body —
+    // every export came back corrupted once actually deployed. Back to a
+    // fully-buffered Buffer, which is what's proven to produce valid PDFs.
     const pdfBuffer = compact
       ? await renderCompact(
           pages[0].rows,
