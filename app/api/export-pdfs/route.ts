@@ -1,29 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
-import PDFDocument from "pdfkit";
+import fs from "fs";
+import path from "path";
 import type { ColumnSpec } from "@/lib/dashboardConfigs";
+import { renderAllPages, renderCompact, type PageData, type ExportMeta } from "@/lib/pdfRenderer";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
-
-interface SignatureEntry {
-  title: string;
-  role: string;
-  name: string;
-}
-
-interface ReportHeader {
-  lines: string[];
-  period?: string;
-}
-
-interface PageData {
-  pageNumber: string;
-  title: string;
-  columns: string[];
-  rows: Array<Record<string, string>>;
-  header?: ReportHeader;
-  signature?: SignatureEntry[];
-}
 
 interface ExportRequest {
   pages: PageData[];
@@ -31,273 +13,61 @@ interface ExportRequest {
    * decides which columns show, their order, labels and widths. When absent,
    * every returned field is rendered generically. */
   layout?: ColumnSpec[];
-}
-
-interface ResolvedCol {
-  label: string;
-  source: string;
-  group: boolean;
-  width: number;
-}
-
-/** Strip a Tableau aggregation wrapper, e.g. "AGG(Employee ID)" -> "Employee ID". */
-function cleanLabel(source: string): string {
-  const m = source.match(/^[A-Za-z]+\(([^)]+)\)\s*$/);
-  return (m ? m[1] : source).trim();
-}
-
-/**
- * Fields that are Tableau plumbing rather than real data — helper calcs kept
- * on a worksheet's Marks card for filtering/logic (e.g. "tax_mode"), or the
- * built-in Measure Names/Measure Values pseudo-fields when a literal column
- * already stands in for them. These are never shown in the generic fallback
- * for dashboards that don't declare a column layout in their config.
- */
-const ALWAYS_HIDDEN = new Set(["measure names", "measure values", "tax_mode"]);
-
-function widthFor(label: string): number {
-  const isNoCol = /^no$/i.test(label);
-  let weight = isNoCol ? 4 : Math.max(label.length, 6);
-  if (/link|url/i.test(label)) weight += 20;
-  return weight;
-}
-
-/**
- * Build PDF columns from whatever fields the selected worksheet actually
- * returned.
- *  - If the dashboard's config provides a `layout`, only those columns are
- *    shown, in that order, with the configured label/width. Any other field
- *    on the worksheet (helper calcs, stray pseudo-fields, etc.) is left out.
- *  - If no layout is provided (or none of its columns match), fall back to
- *    rendering every returned field generically (minus the always-hidden
- *    plumbing fields), so a new dashboard works with zero route changes.
- * Every column is eligible for "grouping" (its cell is blanked when it
- * repeats the row directly above within the same row-number group), which
- * mimics Tableau's own merged-cell look for repeated dimension values.
- */
-function resolveColumns(available: string[], layout?: ColumnSpec[]): ResolvedCol[] {
-  const used = new Set<string>();
-  const resolved: ResolvedCol[] = [];
-
-  if (layout && layout.length > 0) {
-    for (const pref of layout) {
-      const matches = pref.match.map((m) => m.toLowerCase());
-      const source = available.find(
-        (a) => !used.has(a) && matches.includes(cleanLabel(a).toLowerCase())
-      );
-      if (source) {
-        used.add(source);
-        resolved.push({
-          label: pref.label,
-          source,
-          group: true,
-          width: pref.width ?? widthFor(pref.label)
-        });
-      }
-    }
-    if (resolved.length > 0) return resolved;
-  }
-
-  // No layout, or nothing matched: generic fallback over every returned field.
-  for (const source of available) {
-    const label = cleanLabel(source);
-    if (ALWAYS_HIDDEN.has(label.toLowerCase())) continue;
-    resolved.push({ label, source, group: true, width: widthFor(label) });
-  }
-
-  return resolved;
-}
-
-/**
- * Draws one page-group's table (header, rows, optional trailing signature
- * block) onto a shared PDFDocument, starting a fresh physical page first
- * unless this is the very first group in the document.
- */
-function drawPageGroup(doc: PDFKit.PDFDocument, page: PageData, isFirstGroup: boolean, layout?: ColumnSpec[]): void {
-  if (!isFirstGroup) {
-    doc.addPage({ margin: 30, size: "A4", layout: "landscape" });
-  }
-
-  const cols = resolveColumns(page.columns, layout);
-
-  const pageStartX = doc.page.margins.left;
-  const pageUsableWidth = doc.page.width - doc.page.margins.left - doc.page.margins.right;
-
-  if (page.header && (page.header.lines.length > 0 || page.header.period)) {
-    page.header.lines.forEach((line, i) => {
-      doc
-        .font("Helvetica-Bold")
-        .fontSize(i === 0 ? 14 : 11)
-        .fillColor("#111")
-        .text(line, pageStartX, doc.y, { width: pageUsableWidth, align: "center" });
-    });
-    if (page.header.period) {
-      doc.moveDown(0.15);
-      doc
-        .font("Helvetica")
-        .fontSize(9)
-        .fillColor("#333")
-        .text(page.header.period, pageStartX, doc.y, { width: pageUsableWidth, align: "center" });
-    }
-    doc.moveDown(0.5);
-  }
-
-  doc.fontSize(15).font("Helvetica-Bold").fillColor("#111").text(page.title);
-  doc.moveDown(0.4);
-
-  const startX = doc.page.margins.left;
-  const usableWidth = doc.page.width - doc.page.margins.left - doc.page.margins.right;
-
-  const totalW = cols.reduce((s, c) => s + c.width, 0);
-  const colX: number[] = [];
-  const colW: number[] = [];
-  let acc = startX;
-  for (const c of cols) {
-    const w = (c.width / totalW) * usableWidth;
-    colX.push(acc);
-    colW.push(w);
-    acc += w;
-  }
-
-  const headerHeight = 20;
-  const rowHeight = 16;
-  let y = doc.y;
-
-  const drawHeader = () => {
-    doc.rect(startX, y, usableWidth, headerHeight).fill("#f0f0f0");
-    doc.font("Helvetica-Bold").fontSize(8).fillColor("#111");
-    cols.forEach((c, i) => {
-      doc.text(c.label, colX[i] + 3, y + 6, { width: colW[i] - 6, height: headerHeight, ellipsis: true, lineBreak: false });
-    });
-    doc.moveTo(startX, y + headerHeight).lineTo(startX + usableWidth, y + headerHeight).lineWidth(0.7).strokeColor("#999").stroke();
-    y += headerHeight;
-  };
-
-  drawHeader();
-
-  // The "No" source identifies lead-group boundaries.
-  const noCol = cols.find((c) => c.label === "No");
-  let prevRow: Record<string, string> | null = null;
-  let prevNo: string | null = null;
-
-  for (let r = 0; r < page.rows.length; r++) {
-    const row = page.rows[r];
-
-    if (y + rowHeight > doc.page.height - doc.page.margins.bottom) {
-      doc.addPage({ margin: 30, size: "A4", layout: "landscape" });
-      y = doc.page.margins.top;
-      drawHeader();
-      prevRow = null; // re-show grouped values at top of a continued page
-      prevNo = null;
-    }
-
-    const curNo = noCol ? row[noCol.source] ?? "" : String(r);
-    const isNewGroup = curNo !== prevNo;
-
-    // Separator line between lead groups.
-    if (isNewGroup && r > 0 && y > doc.page.margins.top + headerHeight) {
-      doc.moveTo(startX, y).lineTo(startX + usableWidth, y).lineWidth(0.5).strokeColor("#ccc").stroke();
-    }
-
-    doc.font("Helvetica").fontSize(8).fillColor("#111");
-    cols.forEach((c, i) => {
-      let value = row[c.source] ?? "";
-
-      // Blank grouped columns (No, Channel) when they repeat the value in the
-      // row directly above AND we're still inside the same lead group. A new
-      // lead group always re-shows both No and Channel. This mirrors the
-      // dashboard's merged cells.
-      if (c.group && prevRow && !isNewGroup) {
-        const prevVal = prevRow[c.source] ?? "";
-        if (value === prevVal) value = "";
-      }
-
-      doc.text(String(value).slice(0, 90), colX[i] + 3, y + 3, {
-        width: colW[i] - 6,
-        height: rowHeight,
-        ellipsis: true,
-        lineBreak: false
-      });
-    });
-
-    prevRow = row;
-    prevNo = curNo;
-    y += rowHeight;
-  }
-
-  if (page.signature && page.signature.length > 0) {
-    drawSignatureBlock(doc, page.signature, startX, usableWidth, y);
-  }
-}
-
-/**
- * Draws the "Prepared by / Approved by / Approved by / Acknowledged by"
- * sign-off block below the table: one evenly-spaced column per entry, a role
- * caption, blank space for a physical signature, and the name in parentheses.
- * Starts a new page if there isn't enough room left on the current one.
- */
-function drawSignatureBlock(
-  doc: PDFKit.PDFDocument,
-  entries: SignatureEntry[],
-  startX: number,
-  usableWidth: number,
-  currentY: number
-): void {
-  const blockHeight = 110; // title + signing space + name
-  const topGap = 24;
-  let y = currentY + topGap;
-
-  if (y + blockHeight > doc.page.height - doc.page.margins.bottom) {
-    doc.addPage({ margin: 30, size: "A4", layout: "landscape" });
-    y = doc.page.margins.top + topGap;
-  } else {
-    doc.moveTo(startX, currentY + 10).lineTo(startX + usableWidth, currentY + 10).lineWidth(0.7).strokeColor("#999").stroke();
-  }
-
-  const colW = usableWidth / entries.length;
-
-  entries.forEach((e, i) => {
-    const cx = startX + i * colW;
-
-    doc.font("Helvetica").fontSize(10).fillColor("#111");
-    doc.text(e.title, cx, y, { width: colW, align: "center" });
-    doc.font("Helvetica-Bold").fontSize(10);
-    doc.text(e.role, cx, y + 14, { width: colW, align: "center" });
-
-    // Signing space, then the resolved name.
-    doc.font("Helvetica").fontSize(10);
-    doc.text(`( ${e.name} )`, cx, y + 70, { width: colW, align: "center" });
-  });
-}
-
-/**
- * Renders every page-group into a single multi-page PDF (each group starts
- * on its own fresh page), instead of one PDF file per group.
- */
-function renderAllPages(pages: PageData[], layout?: ColumnSpec[]): Promise<Buffer> {
-  return new Promise((resolve, reject) => {
-    const doc = new PDFDocument({ margin: 30, size: "A4", layout: "landscape" });
-    const chunks: Buffer[] = [];
-    doc.on("data", (c: Buffer) => chunks.push(c));
-    doc.on("end", () => resolve(Buffer.concat(chunks)));
-    doc.on("error", reject);
-
-    pages.forEach((page, i) => drawPageGroup(doc, page, i === 0, layout));
-
-    doc.end();
-  });
+  /** Whole-export metadata: logo top-left, print date/by/page top-right. Drawn
+   * once at the top of every physical PDF page. */
+  meta?: ExportMeta;
+  /** When true, `pages` is a single flattened page (all rows, one logical
+   * unit) and rendering uses the dynamic/compact packer (`renderCompact`)
+   * instead of the classic per-Tableau-page renderer (`renderAllPages`). */
+  compact?: boolean;
+  /** Diagnostics collected client-side during `buildPages` (e.g. "Print by"/
+   * "Period" fields that didn't resolve). Printed here with console.warn so
+   * they land in the Next.js dev server's own terminal output — the
+   * extension itself runs inside Tableau's embedded webview, which has no
+   * console visible from VS Code. */
+  warnings?: string[];
 }
 
 export async function POST(req: NextRequest) {
   try {
     const body: ExportRequest = await req.json();
-    const { pages, layout } = body;
+    const { pages, layout, meta, compact, warnings } = body;
 
     if (!Array.isArray(pages) || pages.length === 0) {
       return NextResponse.json({ error: "No pages to export." }, { status: 400 });
     }
 
-    const pdfBuffer = await renderAllPages(pages, layout);
+    if (warnings && warnings.length > 0) {
+      console.warn(`--- Export diagnostics (${warnings.length}) ---`);
+      for (const w of warnings) console.warn(w);
+      console.warn("--- end export diagnostics ---");
+    }
+
+    // Best-effort logo load: a missing/misconfigured file just means no logo
+    // is drawn, it never fails the whole export — but log it so a wrong path
+    // shows up in server logs instead of failing silently.
+    let logoBuffer: Buffer | null = null;
+    if (meta?.logo?.path) {
+      const abs = path.join(process.cwd(), "public", meta.logo.path.replace(/^\/+/, ""));
+      try {
+        logoBuffer = fs.readFileSync(abs);
+      } catch (err: any) {
+        console.warn(`Logo not loaded (export will render without it). Looked for: ${abs}. Reason: ${err?.message || err}`);
+        logoBuffer = null;
+      }
+    }
+
+    const pdfBuffer = compact
+      ? await renderCompact(
+          pages[0].rows,
+          pages[0].columns,
+          pages[0].header,
+          layout,
+          meta,
+          logoBuffer,
+          pages[0].signature
+        )
+      : await renderAllPages(pages, layout, meta, logoBuffer);
 
     return new Response(new Uint8Array(pdfBuffer), {
       status: 200,
